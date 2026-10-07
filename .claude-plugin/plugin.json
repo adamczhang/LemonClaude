@@ -1,0 +1,7 @@
+{
+  "name": "sidekick",
+  "version": "0.1.0",
+  "description": "Run Claude Code on a local Lemonade model: /lemonade picks one, /lemonade off switches back",
+  "author": { "name": "Adam Zhang", "email": "adam.c.zhang@gmail.com" },
+  "types": "./types/index.d.ts"
+}

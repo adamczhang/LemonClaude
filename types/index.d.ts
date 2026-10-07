@@ -10,27 +10,19 @@ export type LemonadeModel = {
   isLoaded: boolean
 }
 
-/** The session's routing while Lemonade answers in place of Claude. */
-export type Active = {
-  model: string
-  baseUrl: string
-  hasTools: boolean
-}
-
-/** The environment as it was before the switch, restored by `/lemonade off`. */
+/** The environment as it was before requests went to Lemonade, restored when they stop. */
 export type SavedEnv = {
   ANTHROPIC_BASE_URL: string | null
-  ANTHROPIC_DEFAULT_OPUS_MODEL: string | null
-  ANTHROPIC_DEFAULT_SONNET_MODEL: string | null
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: string | null
-  CLAUDE_CODE_SUBAGENT_MODEL: string | null
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: string | null
 }
 
 declare module 'claude-code' {
   interface PluginState {
     sidekick: {
-      active: Active | null
+      /** The Lemonade model the model selector offers, or null when none is offered. */
+      offered: string | null
+      /** The Lemonade model requests go to now, or null while Claude answers. */
+      routed: string | null
       saved: SavedEnv | null
       models: LemonadeModel[]
       notice: string

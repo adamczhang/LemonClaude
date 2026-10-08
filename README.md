@@ -100,7 +100,7 @@ These work in the terminal too.
   - Then by maker (Qwen, Gemma, MiniCPM, …).
   - A maker with more than eight models opens onto family folders (Qwen3, Qwen3.5, Qwen3-VL, …).
   
-  A folder shows how many models it holds and the sizes they span. A model alone in its group is a row of its own. Press a folder to open it, and a search opens every folder down to what it finds.
+  A folder shows how many models it holds and the sizes they span. A recipe's folder also says what it runs on (NVIDIA GPU, NPU…) and whether its backend is still to be installed. Every `/lemonade` starts with all folders closed. A model alone in its group is a row of its own. Press a folder to open it, and a search opens every folder down to what it finds.
 - Each row lines up the model's name, size and tags (`tools`, `vision`, `reasoning`, `coding`), with sizes in the order people read them: 2B, 9B, 27B.
 - **Use** switches requests to a downloaded model, as `/lemonade on <model>` does.
 - **Download** asks Lemonade to download a model. Lemonade runs the download itself, so it keeps going if you close the session, and the row shows its progress. When it finishes, the model moves to **Downloaded**. A failed download says why, next to **Retry download**.

@@ -24,6 +24,9 @@ export type DownloadState = {
   error?: string
 }
 
+/** Where a Lemonade recipe runs by default (`NPU`, `NVIDIA GPU`), and whether that backend is installed. */
+export type Recipe = { device: string; isInstalled: boolean }
+
 /** The environment as it was before requests went to Lemonade, restored when they stop. */
 export type SavedEnv = {
   ANTHROPIC_BASE_URL: string | null
@@ -52,8 +55,10 @@ declare module 'claude-code' {
       search: string
       /** True while the model list shows downloaded models only. */
       isDownloadedOnly: boolean
-      /** The recipe groups the model list has open. */
+      /** The folders the model list has open; every /lemonade starts with none. */
       expanded: string[]
+      /** Each recipe's default device and backend state, as /api/v1/system-info says. */
+      recipes: Record<string, Recipe>
     }
   }
 }

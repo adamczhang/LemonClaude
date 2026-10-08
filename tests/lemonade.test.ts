@@ -18,8 +18,8 @@ type Loaded = { model_name: string; type: string; pinned: boolean; recipe_option
 // What this machine can run, as /api/v1/system-info judges it: no NPU for FastFlowLM.
 const SYSTEM = {
   recipes: {
-    llamacpp: { backends: { cuda: { state: 'installed' }, rocm: { state: 'unsupported' } } },
-    'ryzenai-llm': { backends: { npu: { state: 'installable' } } },
+    llamacpp: { default_backend: 'cuda', backends: { cuda: { state: 'installed' }, rocm: { state: 'unsupported' } } },
+    'ryzenai-llm': { default_backend: 'npu', backends: { npu: { state: 'installable' } } },
     flm: { backends: { npu: { state: 'unsupported' } } },
   },
 }
@@ -342,8 +342,9 @@ describe('model manager', () => {
       expect(await ui.find({ key: 'use-Gemma-Chat-GGUF' })).toBeDefined()
       // Then the rest, grouped by recipe as Lemonade groups them, each model in one place only.
       expect((await ui.find({ type: 'Text', text: /^SUGGESTED/ }))?.text).toBe('SUGGESTED · 2 to download')
-      expect((await ui.find({ key: 'group-box-llamacpp' }))?.text).toContain('Llama.cpp GPU1 · 9.00 GB')
-      expect((await ui.find({ key: 'group-box-ryzenai-llm' }))?.text).toContain('Ryzen AI LLM1 · 650 MB')
+      // Each recipe says where it runs, and when its backend isn't installed yet.
+      expect((await ui.find({ key: 'group-box-llamacpp' }))?.text).toContain('Llama.cpp GPU1 · 9.00 GB · NVIDIA GPU')
+      expect((await ui.find({ key: 'group-box-ryzenai-llm' }))?.text).toContain('Ryzen AI LLM1 · 650 MB · NPU · backend not installed yet')
       expect(await ui.findAll({ key: 'row-Qwen3.5-4B-GGUF' })).toHaveLength(1)
       // Speech, music, models Lemonade doesn't suggest, and recipes this machine can't run stay out.
       expect(await ui.find({ key: 'group-whispercpp' })).toBeUndefined()
@@ -754,6 +755,19 @@ describe('model list nesting', () => {
     // (Qwen3.5-4B-GGUF, loaded, sits under Active, not in the folder.)
     const rows = (await ui.findAll({ type: 'Box' })).map(b => b.key).filter(k => k?.startsWith('row-Qwen3.5') && k !== 'row-Qwen3.5-4B-GGUF')
     expect(rows).toEqual(['row-Qwen3.5-2B-GGUF', 'row-Qwen3.5-9B-GGUF', 'row-Qwen3.5-27B-GGUF'])
+  })
+
+  test('every /lemonade starts with all folders closed', async ($, on) => {
+    const { lemonade: server } = world(on)
+    server.models.push(suggest('Phi-4-mini-instruct-GGUF'), suggest('Phi-3-mini-GGUF'))
+    await start($)
+    const first = await manager($, 'desktop')
+    await first.press({ key: 'group-llamacpp' })
+    await first.press({ key: 'group-llamacpp/phi' })
+    expect(await first.find({ key: 'row-Phi-3-mini-GGUF' })).toBeDefined()
+    const again = await manager($, 'desktop', '', 'm2')
+    expect((await again.find({ key: 'group-llamacpp' }))?.text).toContain('▸')
+    expect(await again.find({ key: 'group-llamacpp/phi' })).toBeUndefined()
   })
 
   test('a search opens every folder down to the models it finds', async ($, on) => {

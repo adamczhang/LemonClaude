@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { DownloadState, LemonadeModel, SavedEnv } from '../types'
+import type { DownloadState, LemonadeModel, Recipe, SavedEnv } from '../types'
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:13305'
 const DEFAULT_MODEL = 'Qwen3.5-4B-GGUF'
@@ -22,6 +22,7 @@ const downloads = atom({ plugin: 'lemonclaude', key: 'downloads' } as const, {} 
 const search = atom({ plugin: 'lemonclaude', key: 'search' } as const, '')
 const isDownloadedOnly = atom({ plugin: 'lemonclaude', key: 'isDownloadedOnly' } as const, false)
 const expanded = atom({ plugin: 'lemonclaude', key: 'expanded' } as const, [] as string[])
+const recipeInfo = atom({ plugin: 'lemonclaude', key: 'recipes' } as const, {} as Record<string, Recipe>)
 
 type $ = EngineInterface
 
@@ -39,6 +40,17 @@ const NOT_CHAT = [
   'upscaling',
   '3d',
 ]
+
+// What a recipe's default backend runs on, in a word or two.
+const BACKENDS: Record<string, string> = {
+  cpu: 'CPU',
+  cuda: 'NVIDIA GPU',
+  metal: 'Apple GPU',
+  npu: 'NPU',
+  rocm: 'AMD GPU',
+  system: 'CPU and GPU',
+  vulkan: 'GPU (Vulkan)',
+}
 
 // Lemonade's own names for its recipes, as its model manager groups them.
 const RECIPES: Record<string, string> = {
@@ -100,7 +112,7 @@ function unreachable(base: string, err: unknown): string {
  * labels it `chat`; a downloaded one also when it has no label saying otherwise, as a model pulled
  * without labels gets its recipe's default, chat for an LLM recipe.
  */
-export async function listCatalog($: $, base: string): Promise<LemonadeModel[]> {
+export async function listCatalog($: $, base: string): Promise<{ models: LemonadeModel[]; recipes: Record<string, Recipe> }> {
   const listed = await askLemonade($, `${base}/api/v1/models?show_all=true`)
   if (!listed.ok) throw new Error(`Lemonade answered ${listed.status} at ${base}/api/v1/models`)
   const data = (JSON.parse(listed.text).data ?? []) as Array<{
@@ -120,12 +132,19 @@ export async function listCatalog($: $, base: string): Promise<LemonadeModel[]> 
   const loaded = new Map((now ?? []).map(m => [m.model_name, m]))
   // Recipes this machine can't run on any backend, as Lemonade judges it: their models are no use here.
   let cannot = new Set<string>()
-  const recipes = (system?.ok ? parsed(system.text)?.recipes : undefined) as
-    | Record<string, { backends?: Record<string, { state?: string }> }>
+  const known = (system?.ok ? parsed(system.text)?.recipes : undefined) as
+    | Record<string, { default_backend?: string; backends?: Record<string, { state?: string }> }>
     | undefined
-  if (recipes) {
+  // Where each recipe runs by default, and whether that backend is installed yet.
+  const about: Record<string, Recipe> = {}
+  for (const [name, r] of Object.entries(known ?? {})) {
+    const backend = r.default_backend ?? ''
+    const state = r.backends?.[backend]?.state
+    if (backend) about[name] = { device: BACKENDS[backend] ?? backend, isInstalled: state === 'installed' }
+  }
+  if (known) {
     cannot = new Set(
-      Object.entries(recipes)
+      Object.entries(known)
         .filter(([, r]) => {
           const states = Object.values(r.backends ?? {}).map(b => b.state)
           return states.length > 0 && states.every(state => state === 'unsupported')
@@ -134,7 +153,7 @@ export async function listCatalog($: $, base: string): Promise<LemonadeModel[]> 
     )
   }
 
-  return data
+  const models = data
     .filter(m => !(m.labels ?? []).some(l => NOT_CHAT.includes(l)))
     .filter(m => m.downloaded !== false || !cannot.has(m.recipe ?? ''))
     .filter(m => (m.downloaded !== false ? true : m.suggested !== false && (m.labels ?? []).includes('chat')))
@@ -149,6 +168,7 @@ export async function listCatalog($: $, base: string): Promise<LemonadeModel[]> 
       ...(loaded.get(m.id)?.pinned ? { pin: m.id in held ? ('mine' as const) : ('theirs' as const) } : {}),
     }))
     .sort((a, b) => a.id.localeCompare(b.id, undefined, { sensitivity: 'base' }))
+  return { models, recipes: about }
 }
 
 /** The catalog's downloaded models, the ones requests can go to, tool-calling ones first. */
@@ -165,8 +185,9 @@ async function downloadedModels($: $): Promise<LemonadeModel[]> {
 async function refresh($: $): Promise<LemonadeModel[]> {
   const base = await baseUrl($)
   try {
-    const all = await listCatalog($, base)
+    const { models: all, recipes: about } = await listCatalog($, base)
     await update($, catalog, () => all)
+    await update($, recipeInfo, () => about)
     await update($, notice, () => '')
     return downloadedOf(all)
   } catch (err) {
@@ -256,7 +277,9 @@ function familyOf(id: string): string {
 const FAMILY_FOLDERS_OVER = 8
 
 /** One line of a nested model list: a folder of two or more models, or a model of its own. */
-type Entry = { kind: 'folder'; key: string; name: string; models: LemonadeModel[]; inner: Entry[] } | { kind: 'model'; model: LemonadeModel }
+type Entry =
+  | { kind: 'folder'; key: string; name: string; models: LemonadeModel[]; inner: Entry[]; notes?: string[] }
+  | { kind: 'model'; model: LemonadeModel }
 
 /**
  * `models` grouped by `keyOf`: groups of two or more become folders, named by `nameOf`, and are
@@ -892,8 +915,9 @@ export const register: Register = on => {
     if (arg) return { text: await choose($, arg) }
 
     // Bare, the output row draws as the model manager (the CommandOutput hook); the text is what the model reads.
-    // A new list starts unfiltered: its search box starts empty.
+    // A new list starts unfiltered and collapsed: an empty search box, every folder closed.
     await update($, search, () => '')
+    await update($, expanded, () => [] as string[])
     const list = await refresh($)
     if (await pollDownloads($)) watchDownloads($)
     return { text: await describe($, list) }
@@ -934,6 +958,7 @@ export const register: Register = on => {
     const query = (await read($, search)).trim().toLowerCase()
     const onlyDownloaded = await read($, isDownloadedOnly)
     const open = await read($, expanded)
+    const about = await read($, recipeInfo)
     const jobs = await read($, downloads)
     const now = await read($, routed)
     const held = (await read($, heldOver)) !== null
@@ -996,7 +1021,7 @@ export const register: Register = on => {
         <Box key={`group-box-${item.key}`} flexDirection="column">
           <Box flexDirection="row" gap={1}>
             <Button key={`group-${item.key}`} plain label={`${isOpen ? '▾' : '▸'} ${item.name}`} onPress={toggle} />
-            <Text dimColor>{`${item.models.length} · ${sizeRange(item.models)}`}</Text>
+            <Text dimColor>{[String(item.models.length), sizeRange(item.models), ...(item.notes ?? [])].filter(Boolean).join(' · ')}</Text>
           </Box>
           {isOpen ? (
             <Box flexDirection="column" paddingLeft={2}>
@@ -1020,7 +1045,9 @@ export const register: Register = on => {
     // Each recipe is a folder of its own, however few models it has, as in Lemonade's model manager.
     const group = (recipe: string) => {
       const models = groups.get(recipe)!
-      return entry({ kind: 'folder', key: recipe, name: recipeName(recipe), models, inner: recipeEntries(recipe, models) })
+      const runs = about[recipe]
+      const notes = runs ? [runs.device, ...(runs.isInstalled ? [] : ['backend not installed yet'])] : []
+      return entry({ kind: 'folder', key: recipe, name: recipeName(recipe), models, inner: recipeEntries(recipe, models), notes })
     }
 
     const section = (title: string, list: readonly LemonadeModel[], empty: string) => (

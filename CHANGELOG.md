@@ -13,7 +13,7 @@ This release brings LemonClaude to the Claude Code desktop app and lets you mana
   - **Use** switches requests to a downloaded model.
   - **Download** starts a download that Lemonade runs itself, with live progress in the row and Lemonade's reason if it fails.
   - Models whose recipe this machine can't run are left out.
-  - Suggested models nest in folders: recipe, then maker (Qwen, Gemma, …), then family (Qwen3.5, …) for makers with more than eight. Each folder shows its count and size range, and rows line up in columns.
+  - Suggested models nest in folders: recipe, then maker (Qwen, Gemma, …), then family (Qwen3.5, …) for makers with more than eight. Each folder shows its count and size range, and rows line up in columns. Recipe folders say what they run on and whether their backend is installed. Every `/lemonade` starts with all folders closed.
 - `/lemonade on [model]`, which sends every request to the offered Lemonade model whatever the model selector shows. `/lemonade off`, or picking another model in a picker, hands routing back. This is how to use Lemonade from the desktop app. Ending the session turns it off.
 - Starting Lemonade Server on Windows when a request needs it and it isn't running, then waiting up to 60 seconds for it. `/lemonade`, `/lemonade on` and `/lemonade <model>` start it too. The server is started detached, so it keeps running after the session. Set `LEMONCLAUDE_AUTOSTART=0` to turn this off.
 - The selector entry says "starts when picked" while Lemonade is down and LemonClaude can start it.

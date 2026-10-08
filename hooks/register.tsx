@@ -5,6 +5,7 @@ import type { LemonadeModel, SavedEnv } from '../types'
 
 const PANE = 'lemonade-picker'
 const DEFAULT_BASE_URL = 'http://127.0.0.1:13305'
+const DEFAULT_MODEL = 'Qwen3.5-4B-GGUF'
 
 const offered = atom({ plugin: 'sidekick', key: 'offered' } as const, null as string | null)
 const routed = atom({ plugin: 'sidekick', key: 'routed' } as const, null as string | null)
@@ -82,13 +83,28 @@ function describeModel(m: LemonadeModel): string {
   return [m.size ? `${m.size} GB` : '', m.hasTools ? 'tools' : 'no tools', m.isLoaded ? 'loaded' : ''].filter(Boolean).join(', ')
 }
 
-/** Puts `id` in Claude Code's model selector, as the one custom entry it has. */
-async function offer($: $, m: LemonadeModel): Promise<void> {
+/**
+ * Puts `m` in Claude Code's model selector, as the one custom entry it has. `isUp` false marks an
+ * entry offered from memory while Lemonade did not answer.
+ */
+async function offer($: $, m: LemonadeModel, isUp = true): Promise<void> {
+  const detail = isUp ? describeModel(m) : `${m.size ? `${m.size} GB, ` : ''}Lemonade not running, start it first`
   await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION', m.id)
   await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION_NAME', `🍋 ${m.id}`)
-  await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION', `Local via Lemonade · ${describeModel(m)}`)
+  await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION', `Local via Lemonade · ${detail}`)
   await update($, offered, () => m.id)
-  await $.store.set('lastModel', m.id)
+  if (isUp) await $.store.set('lastOffer', { ...m, isLoaded: false })
+}
+
+/**
+ * What to offer while Lemonade is down: the model offered last time, else SIDEKICK_LEMONADE_MODEL,
+ * else the default. Picking it before Lemonade starts fails with a connection error, as the entry says.
+ */
+async function rememberedOffer($: $): Promise<LemonadeModel> {
+  const last = (await $.store.get('lastOffer')) as LemonadeModel | undefined
+  if (last?.id) return last
+  const id = (await $.env.get('SIDEKICK_LEMONADE_MODEL')) ?? DEFAULT_MODEL
+  return { id, labels: [], hasTools: true, isLoaded: false }
 }
 
 async function snapshot($: $): Promise<SavedEnv> {
@@ -178,12 +194,18 @@ export const register: Register = on => {
     if ((await read($, offered)) === null) {
       const theirs = await $.env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')
       const list = await refresh($)
-      const last = await $.store.get('lastModel')
-      const preferred =
-        list.find(m => m.id === theirs) ??
-        (theirs ? undefined : list.find(m => m.id === last) ?? list.find(m => m.hasTools) ?? list[0])
-      // An entry the person configured for something other than Lemonade is theirs to keep.
-      if (preferred) await offer($, preferred)
+      const isUp = (await read($, notice)) === ''
+      const remembered = await rememberedOffer($)
+      if (!isUp) {
+        // Lemonade is down: offer the remembered model anyway, unless the entry is the person's own.
+        if (!theirs || theirs === remembered.id) await offer($, remembered, false)
+      } else {
+        const preferred =
+          list.find(m => m.id === theirs) ??
+          (theirs ? undefined : list.find(m => m.id === remembered.id) ?? list.find(m => m.hasTools) ?? list[0])
+        // An entry the person configured for something other than Lemonade is theirs to keep.
+        if (preferred) await offer($, preferred)
+      }
     }
     $.ui.status((await read($, routed)) ? `🍋 ${await read($, routed)} (Lemonade)` : undefined)
     return next(e)
@@ -209,7 +231,12 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     const model = await lemonadeModelOf($, await $.session.model())
     await route($, model)
-    return yield* next(model ? { ...e, model } : e)
+    const result = yield* next(model ? { ...e, model } : e)
+    // No response from Lemonade is most often a server that isn't running.
+    if (model && result.stopReason === null && !next.signal.aborted) {
+      $.ui.toast(`Lemonade didn't answer at ${await baseUrl($)}. Start Lemonade Server, or pick a Claude model.`)
+    }
+    return result
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

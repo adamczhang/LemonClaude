@@ -5,13 +5,14 @@ A Claude Code mod that adds a local [Lemonade](https://github.com/lemonade-sdk/l
 ## Use
 
 - **Model selector:** at startup the mod adds one entry, such as `🍋 Qwen3.5-4B-GGUF`. Claude Code allows only one custom entry. The mod offers the model you chose last; the first time, it offers the first downloaded model that supports tool calling.
+- **Lemonade down at startup:** the entry still appears, offering the model from last time (else `SIDEKICK_LEMONADE_MODEL`, else `Qwen3.5-4B-GGUF`). Its description says Lemonade isn't running. Start Lemonade before picking it; if Lemonade doesn't answer, a toast says so.
 - **`/lemonade`** opens a picker of Lemonade's downloaded chat models, with size, tool support and loaded state. Your choice becomes the selector's entry.
 - **`/lemonade <model>`** does the same from the command line. It takes the exact id or any unique part of it (`/lemonade qwen`).
 - **`/lemonade list`** shows the models, what the selector offers, and where requests go now.
 
 While requests go to Lemonade, the status line shows `🍋 <model> (Lemonade)`.
 
-Set `LEMONADE_BASE_URL` to use a server other than `http://127.0.0.1:13305`.
+Set `LEMONADE_BASE_URL` to use a server other than `http://127.0.0.1:13305`. To change which model is offered while Lemonade is down and nothing is remembered yet, set `SIDEKICK_LEMONADE_MODEL`.
 
 ## How it works
 

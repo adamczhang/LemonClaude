@@ -12,22 +12,26 @@ const MODELS = {
 }
 const HEALTH = { all_models_loaded: [{ model_name: 'Qwen3.5-4B-GGUF' }] }
 
-type World = { env: Map<string, string>; asked: string[]; session: { model: string } }
+type World = { env: Map<string, string>; asked: string[]; session: { model: string }; toasts: string[] }
 
 /**
  * A fake Lemonade, an in-memory environment and store, a session model the test sets as the
  * model selector would, and a model that records which model and base URL each request used.
  */
-function world(on: On, initialEnv: Record<string, string> = {}, opts: { reachable?: boolean; store?: Record<string, unknown> } = {}): World {
+function world(on: On, initialEnv: Record<string, string> = {}, opts: { reachable?: boolean; store?: Record<string, unknown>; failSteps?: boolean } = {}): World {
   const env = new Map(Object.entries(initialEnv))
   const asked: string[] = []
   const session = { model: 'claude-opus-5-5' }
+  const toasts: string[] = []
   mock.store(on, opts.store)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.model', () => ({ value: session.model }))
   on('ui.status', () => ({ value: undefined }))
-  on('ui.toast', () => ({ value: undefined }) as never)
+  on('ui.toast', ($, e) => {
+    toasts.push(JSON.stringify(e))
+    return { value: undefined } as never
+  })
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
   on('ui.close', () => ({ value: undefined }))
   on('command.register', () => ({ value: undefined }) as never)
@@ -46,9 +50,10 @@ function world(on: On, initialEnv: Record<string, string> = {}, opts: { reachabl
   })
   on('turn.step', async function* ($, e) {
     asked.push(`${e.model} @ ${env.get('ANTHROPIC_BASE_URL') ?? 'default'}`)
+    if (opts.failSteps) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn' as const, usage: null }
   })
-  return { env, asked, session }
+  return { env, asked, session, toasts }
 }
 
 async function start($: Engine) {
@@ -76,7 +81,7 @@ describe('model selector entry', () => {
   })
 
   test('session start offers the model chosen last time', async ($, on) => {
-    const { env } = world(on, {}, { store: { lastModel: 'Gemma-Chat-GGUF' } })
+    const { env } = world(on, {}, { store: { lastOffer: { id: 'Gemma-Chat-GGUF', size: 2.1, labels: ['chat'], hasTools: false, isLoaded: false } } })
     await start($)
     expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Gemma-Chat-GGUF')
   })
@@ -88,10 +93,40 @@ describe('model selector entry', () => {
     expect(env.has('ANTHROPIC_CUSTOM_MODEL_OPTION_NAME')).toBe(false)
   })
 
-  test('offers nothing when Lemonade is unreachable', async ($, on) => {
+  test('offers the model from last time while Lemonade is down', async ($, on) => {
+    const lastOffer = { id: 'Gemma-Chat-GGUF', size: 2.1, labels: ['chat'], hasTools: false, isLoaded: false }
+    const { env } = world(on, {}, { reachable: false, store: { lastOffer } })
+    await start($)
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Gemma-Chat-GGUF')
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION')).toBe('Local via Lemonade · 2.1 GB, Lemonade not running, start it first')
+  })
+
+  test('offers the default model while Lemonade is down and nothing is remembered', async ($, on) => {
     const { env } = world(on, {}, { reachable: false })
     await start($)
-    expect(env.has('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe(false)
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Qwen3.5-4B-GGUF')
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION')).toContain('Lemonade not running')
+  })
+
+  test('SIDEKICK_LEMONADE_MODEL names the model to offer while Lemonade is down', async ($, on) => {
+    const { env } = world(on, { SIDEKICK_LEMONADE_MODEL: 'Qwen3-Coder-Next-GGUF' }, { reachable: false })
+    await start($)
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Qwen3-Coder-Next-GGUF')
+  })
+
+  test("leaves the person's own custom entry alone while Lemonade is down", async ($, on) => {
+    const { env } = world(on, { ANTHROPIC_CUSTOM_MODEL_OPTION: 'my-gateway-model' }, { reachable: false })
+    await start($)
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('my-gateway-model')
+  })
+
+  test('picking the remembered entry routes to Lemonade and says when it does not answer', async ($, on) => {
+    const { asked, session, toasts } = world(on, {}, { reachable: false, failSteps: true })
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    expect(asked).toEqual(['Qwen3.5-4B-GGUF @ http://127.0.0.1:13305'])
+    expect(toasts.some(t => t.includes("Lemonade didn't answer"))).toBe(true)
   })
 
   test('/lemonade <model> changes the entry', async ($, on) => {

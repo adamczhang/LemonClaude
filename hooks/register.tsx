@@ -49,6 +49,46 @@ async function baseUrl($: $): Promise<string> {
   return (fromEnv ?? DEFAULT_BASE_URL).replace(/\/+$/, '')
 }
 
+type Answer = { ok: boolean; status: number; text: string }
+
+/**
+ * A request to Lemonade. Claude Code refuses a plugin's own requests while
+ * CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set (people set it for privacy, and `lemonade launch
+ * claude` does), so a refused one goes out through curl instead: Lemonade is this mod's essential traffic.
+ * Rejects when Lemonade can't be reached either way.
+ */
+async function askLemonade($: $, url: string, init: { method?: string; body?: string } = {}): Promise<Answer> {
+  const headers = init.body ? { 'Content-Type': 'application/json' } : undefined
+  try {
+    return await $.http.fetch(url, { ...init, ...(headers ? { headers } : {}) })
+  } catch (err) {
+    if (!/nonessential/i.test(String(err))) throw err
+  }
+  const argv = ['curl', '-sS', '-m', '20', '-X', init.method ?? 'GET', '-w', '\n%{http_code}']
+  if (init.body) argv.push('-H', 'Content-Type: application/json', '--data-binary', '@-')
+  const ran = await $.process.run([...argv, url], { ...(init.body ? { stdin: init.body } : {}), timeoutMs: 25_000 })
+  if (ran.exitCode !== 0) throw new Error(ran.stderr.trim() || `curl exited ${ran.exitCode}`)
+  const cut = ran.stdout.lastIndexOf('\n')
+  const status = Number(ran.stdout.slice(cut + 1))
+  return { ok: status >= 200 && status < 300, status, text: ran.stdout.slice(0, cut) }
+}
+
+/** `text` parsed, or undefined when it isn't JSON: a side answer that can't be read is one not had. */
+function parsed(text: string): any {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+/** Why Lemonade couldn't be reached, in a line: the engine's wrapping and repeats cut away. */
+function unreachable(base: string, err: unknown): string {
+  const said = String(err instanceof Error ? err.message : err)
+  if (/ECONNREFUSED|Couldn't connect|Failed to connect/i.test(said)) return `Lemonade isn't running at ${base}.`
+  return `Lemonade isn't reachable at ${base}: ${said.replace(/^.*?failed: /, '')}`
+}
+
 /**
  * Lemonade's chat models, downloaded or suggested, by name; throws when the server is unreachable.
  * Speech, image and music models are no use to Claude Code. A suggested model counts when Lemonade
@@ -56,7 +96,7 @@ async function baseUrl($: $): Promise<string> {
  * without labels gets its recipe's default, chat for an LLM recipe.
  */
 export async function listCatalog($: $, base: string): Promise<LemonadeModel[]> {
-  const listed = await $.http.fetch(`${base}/api/v1/models?show_all=true`)
+  const listed = await askLemonade($, `${base}/api/v1/models?show_all=true`)
   if (!listed.ok) throw new Error(`Lemonade answered ${listed.status} at ${base}/api/v1/models`)
   const data = (JSON.parse(listed.text).data ?? []) as Array<{
     id: string
@@ -67,15 +107,31 @@ export async function listCatalog($: $, base: string): Promise<LemonadeModel[]> 
     suggested?: boolean
   }>
 
-  let loaded = new Set<string>()
-  const health = await $.http.fetch(`${base}/api/v1/health`).catch(() => undefined)
-  if (health?.ok) {
-    const all = (JSON.parse(health.text).all_models_loaded ?? []) as Array<{ model_name: string }>
-    loaded = new Set(all.map(m => m.model_name))
+  const [health, system] = await Promise.all([
+    askLemonade($, `${base}/api/v1/health`).catch(() => undefined),
+    askLemonade($, `${base}/api/v1/system-info`).catch(() => undefined),
+  ])
+  const all = (health?.ok ? parsed(health.text)?.all_models_loaded : undefined) as Array<{ model_name: string }> | undefined
+  const loaded = new Set((all ?? []).map(m => m.model_name))
+  // Recipes this machine can't run on any backend, as Lemonade judges it: their models are no use here.
+  let cannot = new Set<string>()
+  const recipes = (system?.ok ? parsed(system.text)?.recipes : undefined) as
+    | Record<string, { backends?: Record<string, { state?: string }> }>
+    | undefined
+  if (recipes) {
+    cannot = new Set(
+      Object.entries(recipes)
+        .filter(([, r]) => {
+          const states = Object.values(r.backends ?? {}).map(b => b.state)
+          return states.length > 0 && states.every(state => state === 'unsupported')
+        })
+        .map(([name]) => name),
+    )
   }
 
   return data
     .filter(m => !(m.labels ?? []).some(l => NOT_CHAT.includes(l)))
+    .filter(m => m.downloaded !== false || !cannot.has(m.recipe ?? ''))
     .filter(m => (m.downloaded !== false ? true : m.suggested !== false && (m.labels ?? []).includes('chat')))
     .map(m => ({
       id: m.id,
@@ -108,7 +164,7 @@ async function refresh($: $): Promise<LemonadeModel[]> {
     await update($, notice, () => '')
     return downloadedOf(all)
   } catch (err) {
-    await update($, notice, () => `Lemonade isn't reachable at ${base}: ${(err as Error).message}`)
+    await update($, notice, () => unreachable(base, err))
     return models($)
   }
 }
@@ -119,16 +175,16 @@ async function refresh($: $): Promise<LemonadeModel[]> {
  */
 async function pollDownloads($: $): Promise<boolean> {
   const base = await baseUrl($)
-  const listed = await $.http.fetch(`${base}/api/v1/downloads`).catch(() => undefined)
-  if (!listed?.ok) return false
-  const jobs = JSON.parse(listed.text) as Array<{
+  const listed = await askLemonade($, `${base}/api/v1/downloads`).catch(() => undefined)
+  const jobs = (listed?.ok ? parsed(listed.text) : undefined) as Array<{
     model_name: string
     status: string
     running?: boolean
     percent?: number
     complete?: boolean
     error?: string
-  }>
+  }> | undefined
+  if (!Array.isArray(jobs)) return false
   let finished: string[] = []
   // Merged into what is there now, not a copy read earlier: a press of Download can land in between.
   const now = await update($, downloads, before => {
@@ -165,11 +221,13 @@ let poller: { cancel: () => void } | null = null
 function watchDownloads($: $): void {
   if (poller) return
   poller = $.clock.every(1000, () =>
-    void pollDownloads($).then(isRunning => {
-      if (isRunning) return
-      poller?.cancel()
-      poller = null
-    }),
+    void pollDownloads($)
+      .catch(() => false)
+      .then(isRunning => {
+        if (isRunning) return
+        poller?.cancel()
+        poller = null
+      }),
   )
 }
 
@@ -203,13 +261,10 @@ async function download($: $, id: string): Promise<void> {
   const base = await baseUrl($)
   // `starting` until Lemonade has the job: a poll before then must not take its absence for a finish.
   await update($, downloads, d => ({ ...d, [id]: { percent: 0, status: 'starting' } }))
-  const started = await $.http
-    .fetch(`${base}/api/v1/pull`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model_name: id, stream: true, subscribe: false }),
-    })
-    .catch((err: Error) => ({ ok: false, status: 0, text: err.message }))
+  const started = await askLemonade($, `${base}/api/v1/pull`, {
+    method: 'POST',
+    body: JSON.stringify({ model_name: id, stream: true, subscribe: false }),
+  }).catch((err: unknown): Answer => ({ ok: false, status: 0, text: unreachable(base, err) }))
   if (!started.ok) {
     const error = pullError(started.text) ?? (started.status ? `Lemonade answered ${started.status}` : started.text)
     await update($, downloads, d => ({ ...d, [id]: { percent: 0, status: 'error', error } }))
@@ -220,8 +275,7 @@ async function download($: $, id: string): Promise<void> {
 }
 
 async function answers($: $, base: string): Promise<boolean> {
-  return $.http
-    .fetch(`${base}/api/v1/health`)
+  return askLemonade($, `${base}/api/v1/health`)
     .then(r => r.ok)
     .catch(() => false)
 }
@@ -295,8 +349,9 @@ export function pick(list: LemonadeModel[], query: string): LemonadeModel | stri
   return `No downloaded Lemonade chat model matches "${query}".`
 }
 
-function describeModel(m: LemonadeModel): string {
-  return [formatSize(m.size), m.hasTools ? 'tools' : 'no tools', m.isLoaded ? 'loaded' : ''].filter(Boolean).join(', ')
+/** A model's size and tool support, and whether it is loaded now unless `isLasting` (the selector keeps it). */
+function describeModel(m: LemonadeModel, isLasting = false): string {
+  return [formatSize(m.size), m.hasTools ? 'tools' : 'no tools', m.isLoaded && !isLasting ? 'loaded' : ''].filter(Boolean).join(', ')
 }
 
 /**
@@ -305,7 +360,7 @@ function describeModel(m: LemonadeModel): string {
  */
 async function offer($: $, m: LemonadeModel, isUp = true, canStart = false): Promise<void> {
   const down = canStart ? 'Lemonade not running, starts when picked' : 'Lemonade not running, start it first'
-  const detail = isUp ? describeModel(m) : [formatSize(m.size), down].filter(Boolean).join(', ')
+  const detail = isUp ? describeModel(m, true) : [formatSize(m.size), down].filter(Boolean).join(', ')
   await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION', m.id)
   await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION_NAME', `🍋 ${m.id}`)
   await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION', `Local via Lemonade · ${detail}`)
@@ -331,10 +386,13 @@ async function snapshot($: $): Promise<SavedEnv> {
   }
 }
 
-// Claude Code reads these per request, so setting them on the running process reroutes the next one.
-// Unlike `lemonade launch claude`, the model aliases (ANTHROPIC_DEFAULT_*_MODEL) stay Claude's: pointing
-// them at Lemonade would make picking Opus in the selector resolve to the Lemonade model. turn.step
-// renames the model on each request instead, subagents included.
+// Claude Code reads ANTHROPIC_BASE_URL per request, so setting it on the running process reroutes the
+// next one. Unlike `lemonade launch claude`, the model aliases (ANTHROPIC_DEFAULT_*_MODEL) stay Claude's:
+// pointing them at Lemonade would make picking Opus in the selector resolve to the Lemonade model.
+// turn.step renames the model on each request instead, subagents included. Nor is
+// CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC set: it turns off telemetry and updates, not routing, and
+// Claude Code would refuse this mod's own requests to Lemonade under it. Restoring puts back both, as
+// saved, so a session an earlier version routed gets its flag back too.
 async function applyEnv($: $, env: SavedEnv): Promise<void> {
   await $.env.set('ANTHROPIC_BASE_URL', env.ANTHROPIC_BASE_URL ?? undefined)
   await $.env.set('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ?? undefined)
@@ -349,10 +407,7 @@ export async function route($: $, model: string | null): Promise<void> {
       const env = await snapshot($)
       await update($, saved, () => env)
     }
-    await applyEnv($, {
-      ANTHROPIC_BASE_URL: await baseUrl($),
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-    })
+    await $.env.set('ANTHROPIC_BASE_URL', await baseUrl($))
   } else {
     const env = await read($, saved)
     if (env) await applyEnv($, env)
@@ -381,7 +436,7 @@ async function lemonadeModelOf($: $, sessionModel: string): Promise<string | nul
 async function offerQuery($: $, query: string): Promise<LemonadeModel | string> {
   const list = await refresh($)
   const problem = await read($, notice)
-  if (problem && list.length === 0) return `${problem}. Start Lemonade Server and try again.`
+  if (problem && list.length === 0) return `${problem} Start Lemonade Server and try again.`
 
   const found = pick(list, query)
   if (typeof found === 'string') return `${found} Downloaded: ${list.map(m => m.id).join(', ') || 'none'}.`
@@ -441,13 +496,17 @@ async function describe($: $, list: readonly LemonadeModel[]): Promise<string> {
   const now = await read($, routed)
   const shown = await read($, offered)
   const held = (await read($, heldOver)) !== null ? ' (/lemonade on; /lemonade off goes back)' : ''
+  const canStart = problem !== '' && (await serverExe($)) !== null
   return [
     now ? `Requests go to ${now} via Lemonade${held}.` : 'Claude answers; pick 🍋 in the model selector, or /lemonade on, to use Lemonade.',
     shown ? `The selector offers: 🍋 ${shown}` : 'The selector offers no Lemonade model yet.',
-    problem || 'Downloaded chat models:',
+    problem ? `${problem}${canStart ? ' /lemonade or /lemonade on starts it.' : ''}` : '',
+    list.length > 0 ? 'Downloaded chat models:' : problem ? '' : 'No chat models downloaded yet: /lemonade lists the ones Lemonade suggests.',
     ...list.map(m => `${m.id === shown ? '* ' : '  '}${m.id} (${describeModel(m)})`),
     '/lemonade <model> changes which one the selector offers.',
-  ].join('\n')
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 export const register: Register = on => {
@@ -539,57 +598,67 @@ export const register: Register = on => {
         (err: unknown) => $.ui.toast(`LemonClaude: ${err instanceof Error ? err.message : String(err)}`),
       )
 
-    // `at` keeps keys unique: a loaded model is drawn under Active models and again in its group.
-    const action = (m: LemonadeModel, at: string) => {
+    const action = (m: LemonadeModel) => {
       if (m.id === now) return <Text color="green">In use</Text>
-      if (m.isDownloaded) return <Button key={`${at}use-${m.id}`} label="Use" onPress={act(() => switchOn($, m.id))} />
+      if (m.isDownloaded) return <Button key={`use-${m.id}`} label="Use" onPress={act(() => switchOn($, m.id))} />
       const job = jobs[m.id]
       if (job?.status === 'starting') return <Text dimColor>Starting download…</Text>
       if (job?.status === 'downloading' || job?.status === 'paused') {
         return <Text dimColor>{`${job.status === 'paused' ? 'Paused' : 'Downloading'} ${Math.round(job.percent)}%`}</Text>
       }
-      const retry = <Button key={`${at}get-${m.id}`} label={job ? 'Retry download' : 'Download'} onPress={act(() => download($, m.id))} />
-      if (!job) return retry
+      const get = <Button key={`get-${m.id}`} label={job ? 'Retry download' : 'Download'} onPress={act(() => download($, m.id))} />
+      if (!job) return get
       return (
         <Box flexDirection="row" gap={1}>
           <Text color="red">{`Download failed${job.error ? `: ${job.error}` : ''}`}</Text>
-          {retry}
+          {get}
         </Box>
       )
     }
 
-    const row = (at: string) => (m: LemonadeModel) => (
-      <Box key={`${at}row-${m.id}`} flexDirection="row" gap={1}>
+    const row = (m: LemonadeModel) => (
+      <Box key={`row-${m.id}`} flexDirection="row" gap={1}>
         {m.isLoaded ? <Text color="green">●</Text> : <Text dimColor={!m.isDownloaded}>●</Text>}
         <Text bold={m.isDownloaded}>{m.id}</Text>
         <Text dimColor>{[formatSize(m.size), tags(m)].filter(Boolean).join(' · ')}</Text>
-        {action(m, at)}
+        {action(m)}
       </Box>
     )
 
-    const shown = all.filter(m => (!onlyDownloaded || m.isDownloaded) && (!query || m.id.toLowerCase().includes(query)))
+    // Three sections, each model in one: loaded, downloaded and ready, and Lemonade's suggestions to
+    // download, grouped by recipe as Lemonade's model manager groups them.
+    const matches = query ? all.filter(m => m.id.toLowerCase().includes(query)) : all
+    const loaded = matches.filter(m => m.isLoaded)
+    const ready = matches.filter(m => m.isDownloaded && !m.isLoaded)
+    const suggested = onlyDownloaded ? [] : matches.filter(m => !m.isDownloaded)
     const groups = new Map<string, LemonadeModel[]>()
-    for (const m of shown) groups.set(m.recipe, [...(groups.get(m.recipe) ?? []), m])
+    for (const m of suggested) groups.set(m.recipe, [...(groups.get(m.recipe) ?? []), m])
     const recipes = [...groups.keys()].sort((a, b) => recipeName(a).localeCompare(recipeName(b)))
-    const loaded = all.filter(m => m.isLoaded)
 
     const group = (recipe: string) => {
       const list = groups.get(recipe)!
-      // A search or the downloaded-only view opens every group it leaves.
-      const isOpen = open.includes(recipe) || query !== '' || onlyDownloaded
+      // A search opens every group it leaves.
+      const isOpen = open.includes(recipe) || query !== ''
       const toggle = () => void update($, expanded, xs => (xs.includes(recipe) ? xs.filter(x => x !== recipe) : [...xs, recipe]))
       return (
         <Box key={`group-box-${recipe}`} flexDirection="column">
           <Button key={`group-${recipe}`} plain label={`${isOpen ? '▾' : '▸'} ${recipeName(recipe)} (${list.length})`} onPress={toggle} />
-          {isOpen ? <Box flexDirection="column" paddingLeft={2}>{list.map(row(''))}</Box> : null}
+          {isOpen ? <Box flexDirection="column" paddingLeft={2}>{list.map(row)}</Box> : null}
         </Box>
       )
     }
 
+    const section = (title: string, list: readonly LemonadeModel[], empty: string) => (
+      <Box flexDirection="column">
+        <Text bold dimColor>{title}</Text>
+        {list.length > 0 ? <Box flexDirection="column">{list.map(row)}</Box> : <Text dimColor>{empty}</Text>}
+      </Box>
+    )
+
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" gap={1}>
-          <Text bold>🍋 Lemonade model manager</Text>
+          <Text bold>🍋 Lemonade models</Text>
           <Text dimColor>{now ? `· requests go to ${now}` : '· Claude answers'}</Text>
           {held ? <Button key="claude" label="Back to Claude" onPress={act(() => switchOff($))} /> : null}
         </Box>
@@ -608,10 +677,14 @@ export const register: Register = on => {
             onPress={() => void update($, isDownloadedOnly, x => !x)}
           />
         </Box>
-        <Text bold dimColor>{`ACTIVE MODELS · ${loaded.length} loaded`}</Text>
-        {loaded.length > 0 ? <Box flexDirection="column">{loaded.map(row('active-'))}</Box> : <Text dimColor>No models loaded</Text>}
-        <Text bold dimColor>{`${onlyDownloaded ? 'DOWNLOADED' : 'SUGGESTED'} MODELS · ${shown.length} shown`}</Text>
-        {recipes.length > 0 ? <Box flexDirection="column">{recipes.map(group)}</Box> : <Text dimColor>No models match.</Text>}
+        {section(`ACTIVE · ${loaded.length} loaded`, loaded, query ? 'No loaded model matches.' : 'No models loaded.')}
+        {section(`DOWNLOADED · ${ready.length} ready`, ready, query ? 'No downloaded model matches.' : 'Nothing else downloaded yet.')}
+        {onlyDownloaded ? null : <Text bold dimColor>{`SUGGESTED · ${suggested.length} to download`}</Text>}
+        {onlyDownloaded ? null : recipes.length > 0 ? (
+          <Box flexDirection="column">{recipes.map(group)}</Box>
+        ) : (
+          <Text dimColor>{query ? 'No suggested model matches.' : 'Lemonade suggests nothing more.'}</Text>
+        )}
       </Box>
     )
   })

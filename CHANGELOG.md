@@ -4,15 +4,27 @@ All notable changes to LemonClaude are listed here. The format follows [Keep a C
 
 ## [Unreleased]
 
+This release brings LemonClaude to the Claude Code desktop app and lets you manage Lemonade's models from inside Claude Code. The desktop app's model picker lists only Claude models, so these changes give it its own way to switch and a model manager to choose from.
+
 ### Added
 
-- On Windows, starting Lemonade Server when a request is about to go to it and it isn't running, then waiting up to 60 seconds for it. `/lemonade` and `/lemonade <model>` start it too. The server is started detached, so it keeps running after the session. Set `LEMONCLAUDE_AUTOSTART=0` to turn this off.
+- A model manager. `/lemonade` draws a model list in the transcript, laid out like Lemonade's own:
+  - Search, a **Downloaded only** switch, and three sections: **Active** (loaded), **Downloaded** (ready to use) and **Suggested** (every other chat model Lemonade offers, grouped by recipe).
+  - **Use** switches requests to a downloaded model.
+  - **Download** starts a download that Lemonade runs itself, with live progress in the row and Lemonade's reason if it fails.
+  - Models whose recipe this machine can't run are left out.
+- `/lemonade on [model]`, which sends every request to the offered Lemonade model whatever the model selector shows. `/lemonade off`, or picking another model in a picker, hands routing back. This is how to use Lemonade from the desktop app. Ending the session turns it off.
+- Starting Lemonade Server on Windows when a request needs it and it isn't running, then waiting up to 60 seconds for it. `/lemonade`, `/lemonade on` and `/lemonade <model>` start it too. The server is started detached, so it keeps running after the session. Set `LEMONCLAUDE_AUTOSTART=0` to turn this off.
 - The selector entry says "starts when picked" while Lemonade is down and LemonClaude can start it.
-- `/lemonade on [model]` sends every request to the offered Lemonade model, whatever the model selector shows, and `/lemonade off`, or picking another model in a model picker, hands routing back to the selector. This is how to use Lemonade from the desktop app, whose model picker lists only Claude models. Ending the session turns it off.
+- Support for `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. With it set, Claude Code refuses a mod's own network requests, so LemonClaude reaches Lemonade through `curl` instead.
 
 ### Changed
 
-- `/lemonade` opens a model manager in the transcript, laid out like Lemonade's own: search, Downloaded only, active models, and every chat model Lemonade suggests, grouped by recipe. **Use** switches to a downloaded model. **Download** starts a download that Lemonade runs itself, with progress in the row. It replaces the picker pane, which the desktop app didn't show.
+- `/lemonade` opens the model manager instead of the picker pane, which the desktop app didn't show.
+- Routing to Lemonade changes only `ANTHROPIC_BASE_URL`. It no longer sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, which turns off telemetry, not routing.
+- A downloaded model counts as a chat model unless a label says otherwise, so a model pulled without labels can be used.
+- Sizes read as Lemonade shows them (`650 MB`, `2.10 GB`). The selector entry no longer says whether a model is loaded, since that goes stale.
+- When Lemonade is down, `/lemonade list` says so in one line and says how to start it.
 
 ## [0.1.0] - 2026-10-07
 
@@ -20,7 +32,7 @@ First release.
 
 ### Added
 
-- A Lemonade model in Claude Code's model selector, shown as `🍋 <model>`. Picking it sends requests to Lemonade Server. Picking a Claude model sends them back. No restart is needed.
+- A Lemonade model in Claude Code's model selector, shown as `🍋 <model>`. Picking it sends requests to Lemonade Server, and picking a Claude model sends them back, with no restart.
 - Routing that follows the session's selected model on every request, subagents included.
 - `/lemonade`, a picker of downloaded chat models showing size, tool support and loaded state.
 - `/lemonade <model>`, which offers a model by exact id or any unique part of it.

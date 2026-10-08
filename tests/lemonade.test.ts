@@ -11,8 +11,17 @@ const MODELS = [
   { id: 'OLMo-1B-Hybrid', size: 0.65, downloaded: false, suggested: true, recipe: 'ryzenai-llm', labels: ['chat'] },
   { id: 'Unlisted-GGUF', size: 4, downloaded: false, suggested: false, recipe: 'llamacpp', labels: ['chat'] },
   { id: 'ACE-Step-Music', size: 10.5, downloaded: false, suggested: true, recipe: 'acestep', labels: ['audio-generation'] },
+  { id: 'FLM-Chat', size: 1, downloaded: false, suggested: true, recipe: 'flm', labels: ['chat'] },
 ]
 const HEALTH = { all_models_loaded: [{ model_name: 'Qwen3.5-4B-GGUF' }] }
+// What this machine can run, as /api/v1/system-info judges it: no NPU for FastFlowLM.
+const SYSTEM = {
+  recipes: {
+    llamacpp: { backends: { cuda: { state: 'installed' }, rocm: { state: 'unsupported' } } },
+    'ryzenai-llm': { backends: { npu: { state: 'installable' } } },
+    flm: { backends: { npu: { state: 'unsupported' } } },
+  },
+}
 
 /** Lemonade's side of a world: its catalog, the download jobs /api/v1/downloads lists, and each pull body. */
 type Lemonade = {
@@ -25,6 +34,8 @@ type Lemonade = {
   pullGate?: Promise<void>
   /** Lemonade refuses each pull with this error. */
   pullError?: string
+  /** Each request that went out through curl, as `METHOD /path`. */
+  curled: string[]
 }
 
 type World = {
@@ -74,7 +85,41 @@ function world(
     return { value: undefined }
   })
   on('fs.exists', ($, e) => ({ value: !!opts.installed && e.path === `${env.get('LOCALAPPDATA')}\\lemonade_server\\bin\\LemonadeServer.exe` }))
+  const lemonade: Lemonade = { models: JSON.parse(JSON.stringify(MODELS)), jobs: [], pulls: [], fetched: [], curled: [] }
+
+  /** The fake Lemonade answering one request, or null when it isn't up. */
+  const serve = async (url: string, method = 'GET', sent?: string): Promise<{ status: number; text: string } | null> => {
+    if (!isUp) return null
+    const path = url.replace(/^https?:\/\/[^/]+/, '')
+    lemonade.fetched.push(path)
+    if (path === '/api/v1/pull' && lemonade.pullError) return { status: 400, text: JSON.stringify({ error: lemonade.pullError }) }
+    if (path === '/api/v1/pull') await lemonade.pullGate
+    let body: unknown
+    if (path === '/api/v1/models?show_all=true') body = { data: lemonade.models }
+    else if (path === '/api/v1/health') body = HEALTH
+    else if (path === '/api/v1/downloads') body = lemonade.jobs
+    else if (path === '/api/v1/system-info') body = SYSTEM
+    else if (path === '/api/v1/pull' && method === 'POST') {
+      const pull = JSON.parse(sent ?? '{}') as { model_name: string }
+      lemonade.pulls.push(pull)
+      lemonade.jobs.push({ model_name: pull.model_name, status: 'downloading', running: true, percent: 0 })
+      body = lemonade.jobs.at(-1)
+    }
+    return body ? { status: 200, text: JSON.stringify(body) } : { status: 404, text: '' }
+  }
+
   on('process.run', async ($, e) => {
+    // curl: the way to Lemonade while Claude Code refuses a plugin's own requests.
+    if (e.argv[0] === 'curl') {
+      const url = e.argv.at(-1)!
+      const method = e.argv[e.argv.indexOf('-X') + 1]
+      lemonade.curled.push(`${method} ${url.replace(/^https?:\/\/[^/]+/, '')}`)
+      const answer = await serve(url, method, e.init?.stdin)
+      const ran = answer
+        ? { exitCode: 0, stdout: `${answer.text}\n${answer.status}`, stderr: '' }
+        : { exitCode: 7, stdout: '', stderr: 'curl: (7) Failed to connect to 127.0.0.1 port 13305' }
+      return { value: { ...ran, isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     runs.push([...e.argv])
     stdin.push(e.init?.stdin ?? '')
     // Long enough for a second request to find the start under way.
@@ -82,28 +127,12 @@ function world(
     if (!opts.startFails) isUp = true
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  const lemonade: Lemonade = { models: JSON.parse(JSON.stringify(MODELS)), jobs: [], pulls: [], fetched: [] }
   on('http.fetch', async ($, e) => {
-    if (!isUp) return { deny: 'connection refused' }
-    const path = e.url.replace(/^https?:\/\/[^/]+/, '')
-    lemonade.fetched.push(path)
-    if (path === '/api/v1/pull' && lemonade.pullError) {
-      return { value: { status: 400, ok: false, headers: {}, text: JSON.stringify({ error: lemonade.pullError }) } }
-    }
-    if (path === '/api/v1/pull') await lemonade.pullGate
-    let body: unknown
-    if (path === '/api/v1/models?show_all=true') body = { data: lemonade.models }
-    else if (path === '/api/v1/health') body = HEALTH
-    else if (path === '/api/v1/downloads') body = lemonade.jobs
-    else if (path === '/api/v1/pull' && e.init?.method === 'POST') {
-      const pull = JSON.parse(e.init.body ?? '{}') as { model_name: string }
-      lemonade.pulls.push(pull)
-      lemonade.jobs.push({ model_name: pull.model_name, status: 'downloading', running: true, percent: 0 })
-      body = lemonade.jobs.at(-1)
-    }
-    return body
-      ? { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
-      : { value: { status: 404, ok: false, headers: {}, text: '' } }
+    // As Claude Code does: a plugin's own requests are refused while nonessential traffic is off.
+    if (env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')) return { deny: 'refused: nonessential network traffic is disabled for this session' }
+    const answer = await serve(e.url, e.init?.method, e.init?.body)
+    if (!answer) return { deny: 'ECONNREFUSED: Unable to connect' }
+    return { value: { status: answer.status, ok: answer.status >= 200 && answer.status < 300, headers: {}, text: answer.text } }
   })
   on('turn.step', async function* ($, e) {
     asked.push(`${e.model} @ ${env.get('ANTHROPIC_BASE_URL') ?? 'default'}`)
@@ -233,21 +262,25 @@ describe('model manager', () => {
       world(on)
       await start($)
       const ui = await manager($, surface)
-      expect((await ui.find({ key: 'group-llamacpp' }))?.text).toContain('Llama.cpp GPU (3)')
+      // Loaded and downloaded models come first, ready to use.
+      expect((await ui.find({ type: 'Text', text: /^ACTIVE/ }))?.text).toBe('ACTIVE · 1 loaded')
+      expect(await ui.find({ key: 'use-Qwen3.5-4B-GGUF' })).toBeDefined()
+      expect((await ui.find({ type: 'Text', text: /^DOWNLOADED/ }))?.text).toBe('DOWNLOADED · 1 ready')
+      expect(await ui.find({ key: 'use-Gemma-Chat-GGUF' })).toBeDefined()
+      // Then the rest, grouped by recipe as Lemonade groups them, each model in one place only.
+      expect((await ui.find({ type: 'Text', text: /^SUGGESTED/ }))?.text).toBe('SUGGESTED · 2 to download')
+      expect((await ui.find({ key: 'group-llamacpp' }))?.text).toContain('Llama.cpp GPU (1)')
       expect((await ui.find({ key: 'group-ryzenai-llm' }))?.text).toContain('Ryzen AI LLM (1)')
-      // Speech, music and models Lemonade doesn't suggest stay out.
+      expect(await ui.findAll({ key: 'row-Qwen3.5-4B-GGUF' })).toHaveLength(1)
+      // Speech, music, models Lemonade doesn't suggest, and recipes this machine can't run stay out.
       expect(await ui.find({ key: 'group-whispercpp' })).toBeUndefined()
       expect(await ui.find({ key: 'group-acestep' })).toBeUndefined()
+      expect(await ui.find({ key: 'group-flm' })).toBeUndefined()
       expect(await ui.find({ text: /Unlisted-GGUF/ })).toBeUndefined()
-      // The loaded model heads the list; groups open on a press.
-      expect(await ui.find({ key: 'active-row-Qwen3.5-4B-GGUF' })).toBeDefined()
+      // Groups open on a press.
       expect(await ui.find({ key: 'row-Not-Pulled-GGUF' })).toBeUndefined()
       await ui.press({ key: 'group-llamacpp' })
       expect(await ui.find({ key: 'get-Not-Pulled-GGUF' })).toBeDefined()
-      expect(await ui.find({ key: 'use-Gemma-Chat-GGUF' })).toBeDefined()
-      // Drawn twice, once under Active models and once in its group, under keys of its own each time.
-      expect(await ui.findAll({ key: 'use-Qwen3.5-4B-GGUF' })).toHaveLength(1)
-      expect(await ui.findAll({ key: 'active-use-Qwen3.5-4B-GGUF' })).toHaveLength(1)
     })
 
     test(`${surface}: Use sends requests to that model, and Back to Claude returns`, async ($, on) => {
@@ -354,7 +387,7 @@ describe('model manager', () => {
     world(on, {}, { reachable: false })
     await start($)
     const ui = await manager($, 'desktop')
-    expect(await ui.find({ text: /isn't reachable/ })).toBeDefined()
+    expect(await ui.find({ text: "Lemonade isn't running at http://127.0.0.1:13305." })).toBeDefined()
   })
 
   test('/lemonade with arguments keeps its text row', async ($, on) => {
@@ -453,6 +486,30 @@ describe('starting Lemonade', () => {
     session.model = 'Qwen3.5-4B-GGUF'
     await step($, session.model)
     expect(runs).toEqual([])
+  })
+})
+
+describe('what it says', () => {
+  test('/lemonade list while Lemonade is down says so in a line, and how to start it', async ($, on) => {
+    world(on, WINDOWS, { reachable: false, installed: true })
+    await start($)
+    const { text } = await lemonade($, 'list')
+    expect(text).toContain("Lemonade isn't running at http://127.0.0.1:13305. /lemonade or /lemonade on starts it.")
+    expect(text).not.toContain('Downloaded chat models:')
+  })
+
+  test('the selector entry leaves out load state, which would go stale', async ($, on) => {
+    const { env } = world(on)
+    await start($)
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION')).toBe('Local via Lemonade · 3.34 GB, tools')
+  })
+
+  test('a downloads answer that is not JSON is taken as no downloads', async ($, on) => {
+    const { lemonade: server } = world(on)
+    await start($)
+    server.jobs = 'not json' as never
+    const { text } = await lemonade($, '')
+    expect(text).toContain('Downloaded chat models:')
   })
 })
 
@@ -562,6 +619,44 @@ describe('/lemonade on and off', () => {
     await start($)
     await lemonade($, 'on')
     expect((await lemonade($, 'list')).text).toContain('Requests go to Qwen3.5-4B-GGUF via Lemonade (/lemonade on')
+  })
+})
+
+describe('nonessential traffic', () => {
+  test('routing leaves the flag alone, so a second request finds Lemonade up and starts nothing', async ($, on) => {
+    const { env, session, runs, toasts } = world(on, WINDOWS, { installed: true })
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    await step($, session.model)
+    expect(env.has('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')).toBe(false)
+    expect(runs).toEqual([])
+    expect(toasts.some(t => t.includes('Starting Lemonade Server'))).toBe(false)
+  })
+
+  test("with the person's flag set, LemonClaude reaches Lemonade through curl", async ($, on) => {
+    const { env, session, asked, runs, lemonade: server } = world(on, { ...WINDOWS, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' }, { installed: true })
+    await start($)
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Qwen3.5-4B-GGUF')
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    expect(asked).toEqual(['Qwen3.5-4B-GGUF @ http://127.0.0.1:13305'])
+    expect(runs).toEqual([])
+    expect(server.curled).toContain('GET /api/v1/models?show_all=true')
+    // Going back to Claude keeps the person's flag.
+    session.model = 'claude-opus-5-5'
+    await step($)
+    expect(env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')).toBe('1')
+  })
+
+  test('a download goes out through curl too', async ($, on) => {
+    const { lemonade: server } = world(on, { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
+    await start($)
+    const ui = await manager($, 'desktop')
+    await ui.press({ key: 'group-llamacpp' })
+    await ui.press({ key: 'get-Not-Pulled-GGUF' })
+    expect(server.pulls).toEqual([{ model_name: 'Not-Pulled-GGUF', stream: true, subscribe: false }])
+    expect(server.curled).toContain('POST /api/v1/pull')
   })
 })
 

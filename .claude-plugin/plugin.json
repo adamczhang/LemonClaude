@@ -1,11 +1,11 @@
 {
   "name": "lemonclaude",
   "version": "0.1.0",
-  "description": "Run Claude Code on a local Lemonade model: pick 🍋 in the model selector, pick a Claude model to switch back",
+  "description": "Switch a Claude Code session between Claude and a local Lemonade model mid-conversation: /lemonade lists, downloads and switches models",
   "author": { "name": "Adam Zhang", "email": "adam.dadvibes@gmail.com" },
   "homepage": "https://github.com/adamczhang/LemonClaude",
   "repository": "https://github.com/adamczhang/LemonClaude",
   "license": "MIT",
-  "keywords": ["lemonade", "local-llm", "model-selector", "mod"],
+  "keywords": ["lemonade", "local-llm", "model-selector", "model-manager", "offline", "mod"],
   "types": "./types/index.d.ts"
 }

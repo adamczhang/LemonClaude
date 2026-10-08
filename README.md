@@ -95,8 +95,13 @@ These work in the terminal too.
 - **Search** filters by name. **Downloaded only** hides models you'd have to download.
 - **Active** lists models Lemonade has loaded in memory, marked with a green dot.
 - **Downloaded** lists models on disk and ready to use.
-- **Suggested** lists every other chat model Lemonade offers, grouped by recipe as Lemonade groups them (Llama.cpp GPU, Ryzen AI LLM, …). Press a group to open it.
-- Each row shows the model's size and tags such as `tools`, `vision`, `reasoning` and `coding`.
+- **Suggested** lists every other chat model Lemonade offers, in folders, as Lemonade's own model manager nests them:
+  - First by recipe (Llama.cpp GPU, Ryzen AI LLM, …).
+  - Then by maker (Qwen, Gemma, MiniCPM, …).
+  - A maker with more than eight models opens onto family folders (Qwen3, Qwen3.5, Qwen3-VL, …).
+  
+  A folder shows how many models it holds and the sizes they span. A model alone in its group is a row of its own. Press a folder to open it, and a search opens every folder down to what it finds.
+- Each row lines up the model's name, size and tags (`tools`, `vision`, `reasoning`, `coding`), with sizes in the order people read them: 2B, 9B, 27B.
 - **Use** switches requests to a downloaded model, as `/lemonade on <model>` does.
 - **Download** asks Lemonade to download a model. Lemonade runs the download itself, so it keeps going if you close the session, and the row shows its progress. When it finishes, the model moves to **Downloaded**. A failed download says why, next to **Retry download**.
 

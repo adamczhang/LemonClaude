@@ -157,7 +157,7 @@ function downloadedOf(all: readonly LemonadeModel[]): LemonadeModel[] {
 }
 
 /** The downloaded models as last fetched. */
-async function models($: $): Promise<LemonadeModel[]> {
+async function downloadedModels($: $): Promise<LemonadeModel[]> {
   return downloadedOf(await read($, catalog))
 }
 
@@ -171,7 +171,7 @@ async function refresh($: $): Promise<LemonadeModel[]> {
     return downloadedOf(all)
   } catch (err) {
     await update($, notice, () => unreachable(base, err))
-    return models($)
+    return downloadedModels($)
   }
 }
 
@@ -241,10 +241,83 @@ function recipeName(recipe: string): string {
   return RECIPES[recipe] ?? (recipe || 'Other')
 }
 
+/** The maker a model's name starts with (Qwen, Gemma, MiniCPM), an org prefix such as Meta- aside; lowercased, to group by. */
+function makerOf(id: string): string {
+  const bare = id.replace(/^(Meta|NVIDIA|AMD|Microsoft|Google)-/i, '')
+  return (/^[A-Za-z]+/.exec(bare)?.[0] ?? bare).toLowerCase()
+}
+
+/** The family a model belongs to: its name before the parameter count (Qwen3.5 of Qwen3.5-4B-GGUF), else the name. */
+function familyOf(id: string): string {
+  return /^(.+?)-\d+(?:\.\d+)?[BbMm](?=$|[-_])/.exec(id)?.[1] ?? id
+}
+
+// A maker with more models than this opens onto family folders instead of a flat list.
+const FAMILY_FOLDERS_OVER = 8
+
+/** One line of a nested model list: a folder of two or more models, or a model of its own. */
+type Entry = { kind: 'folder'; key: string; name: string; models: LemonadeModel[]; inner: Entry[] } | { kind: 'model'; model: LemonadeModel }
+
+/**
+ * `models` grouped by `keyOf`: groups of two or more become folders, named by `nameOf`, and are
+ * listed first; a model alone in its group stays a line of its own. Each folder's lines come from
+ * `inside`. Names sort as people read them (Qwen3 before Qwen3.5, 4B before 12B).
+ */
+function nest(
+  path: string,
+  models: readonly LemonadeModel[],
+  keyOf: (m: LemonadeModel) => string,
+  nameOf: (key: string, members: readonly LemonadeModel[]) => string,
+  inside: (path: string, members: readonly LemonadeModel[]) => Entry[],
+): Entry[] {
+  const groups = new Map<string, LemonadeModel[]>()
+  for (const m of models) groups.set(keyOf(m), [...(groups.get(keyOf(m)) ?? []), m])
+  const byName = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+  const folders: Entry[] = []
+  const singles: Entry[] = []
+  for (const [key, members] of groups) {
+    if (members.length < 2) singles.push({ kind: 'model', model: members[0]! })
+    else {
+      const name = nameOf(key, members)
+      folders.push({ kind: 'folder', key: `${path}/${key}`, name, models: members, inner: inside(`${path}/${key}`, members) })
+    }
+  }
+  folders.sort((a, b) => byName((a as { name: string }).name, (b as { name: string }).name))
+  singles.sort((a, b) => byName((a as { model: LemonadeModel }).model.id, (b as { model: LemonadeModel }).model.id))
+  return [...folders, ...singles]
+}
+
+/** A recipe's models: by maker, and a big maker's by family. */
+function recipeEntries(recipe: string, models: readonly LemonadeModel[]): Entry[] {
+  const flat = (_: string, members: readonly LemonadeModel[]): Entry[] =>
+    [...members]
+      .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true, sensitivity: 'base' }))
+      .map(model => ({ kind: 'model' as const, model }))
+  // The maker's name as most of its models spell it, its org prefix aside.
+  const makerName = (key: string, members: readonly LemonadeModel[]) => {
+    const spelled = members.map(m => /^[A-Za-z]+/.exec(m.id.replace(/^(Meta|NVIDIA|AMD|Microsoft|Google)-/i, ''))?.[0] ?? key)
+    const counts = new Map<string, number>()
+    for (const name of spelled) counts.set(name, (counts.get(name) ?? 0) + 1)
+    return [...counts].sort((a, b) => b[1] - a[1])[0]![0]
+  }
+  const byFamily = (path: string, members: readonly LemonadeModel[]) =>
+    members.length > FAMILY_FOLDERS_OVER ? nest(path, members, m => familyOf(m.id), key => key, flat) : flat(path, members)
+  return nest(recipe, models, m => makerOf(m.id), makerName, byFamily)
+}
+
 /** A size in GB as Lemonade's model manager shows it: MB under a gigabyte. */
 function formatSize(gb?: number): string {
   if (gb === undefined) return ''
   return gb < 1 ? `${Math.round(gb * 1000)} MB` : `${gb.toFixed(2)} GB`
+}
+
+/** The sizes a folder's models span, as Lemonade shows sizes: `250 MB – 1.16 GB`, or one size. */
+function sizeRange(models: readonly LemonadeModel[]): string {
+  const sizes = models.map(m => m.size).filter((size): size is number => size !== undefined)
+  if (sizes.length === 0) return ''
+  const low = Math.min(...sizes)
+  const high = Math.max(...sizes)
+  return low === high ? formatSize(low) : `${formatSize(low)} – ${formatSize(high)}`
 }
 
 function tags(m: LemonadeModel): string {
@@ -688,7 +761,7 @@ async function lemonadeModelOf($: $, sessionModel: string): Promise<string | nul
     await update($, heldOver, () => null as string | null)
   }
   if (sessionModel === (await read($, offered))) return sessionModel
-  return (await models($)).some(m => m.id === sessionModel) ? sessionModel : null
+  return (await downloadedModels($)).some(m => m.id === sessionModel) ? sessionModel : null
 }
 
 /** Offers the model `query` names; resolves that model, or why there is none. */
@@ -735,7 +808,7 @@ async function switchOn($: $, query: string): Promise<string> {
   const sessionModel = await $.session.model()
   await update($, heldOver, () => sessionModel as string | null)
   await route($, id)
-  const m = named ?? (await models($)).find(x => x.id === id)
+  const m = named ?? (await downloadedModels($)).find(x => x.id === id)
   const how = `Requests now go to 🍋 ${id} via Lemonade. /lemonade off, or picking another model, goes back.`
   return `${loaded.message ? `${loaded.message} ` : ''}${how}${m ? caveats(m) : ''}`
 }
@@ -893,14 +966,46 @@ export const register: Register = on => {
       )
     }
 
+    // Columns line up row under row: name, size, tags, then what can be done.
     const row = (m: LemonadeModel) => (
       <Box key={`row-${m.id}`} flexDirection="row" gap={1}>
         {m.isLoaded ? <Text color="green">●</Text> : <Text dimColor={!m.isDownloaded}>●</Text>}
-        <Text bold={m.isDownloaded}>{m.id}</Text>
-        <Text dimColor>{[formatSize(m.size), tags(m)].filter(Boolean).join(' · ')}</Text>
+        <Box width={38} flexShrink={0}>
+          <Text bold={m.isDownloaded} wrap="truncate-end">
+            {m.id}
+          </Text>
+        </Box>
+        <Box width={9} flexShrink={0} justifyContent="flex-end">
+          <Text dimColor>{formatSize(m.size)}</Text>
+        </Box>
+        <Box width={26} flexShrink={0}>
+          <Text dimColor wrap="truncate-end">
+            {tags(m)}
+          </Text>
+        </Box>
         {action(m)}
       </Box>
     )
+
+    // A folder at any depth: a press opens it; a search opens all it holds.
+    const entry = (item: Entry): ReturnType<typeof row> => {
+      if (item.kind === 'model') return row(item.model)
+      const isOpen = open.includes(item.key) || query !== ''
+      const toggle = () => void update($, expanded, xs => (xs.includes(item.key) ? xs.filter(x => x !== item.key) : [...xs, item.key]))
+      return (
+        <Box key={`group-box-${item.key}`} flexDirection="column">
+          <Box flexDirection="row" gap={1}>
+            <Button key={`group-${item.key}`} plain label={`${isOpen ? '▾' : '▸'} ${item.name}`} onPress={toggle} />
+            <Text dimColor>{`${item.models.length} · ${sizeRange(item.models)}`}</Text>
+          </Box>
+          {isOpen ? (
+            <Box flexDirection="column" paddingLeft={2}>
+              {item.inner.map(entry)}
+            </Box>
+          ) : null}
+        </Box>
+      )
+    }
 
     // Three sections, each model in one: loaded, downloaded and ready, and Lemonade's suggestions to
     // download, grouped by recipe as Lemonade's model manager groups them.
@@ -912,17 +1017,10 @@ export const register: Register = on => {
     for (const m of suggested) groups.set(m.recipe, [...(groups.get(m.recipe) ?? []), m])
     const recipes = [...groups.keys()].sort((a, b) => recipeName(a).localeCompare(recipeName(b)))
 
+    // Each recipe is a folder of its own, however few models it has, as in Lemonade's model manager.
     const group = (recipe: string) => {
-      const list = groups.get(recipe)!
-      // A search opens every group it leaves.
-      const isOpen = open.includes(recipe) || query !== ''
-      const toggle = () => void update($, expanded, xs => (xs.includes(recipe) ? xs.filter(x => x !== recipe) : [...xs, recipe]))
-      return (
-        <Box key={`group-box-${recipe}`} flexDirection="column">
-          <Button key={`group-${recipe}`} plain label={`${isOpen ? '▾' : '▸'} ${recipeName(recipe)} (${list.length})`} onPress={toggle} />
-          {isOpen ? <Box flexDirection="column" paddingLeft={2}>{list.map(row)}</Box> : null}
-        </Box>
-      )
+      const models = groups.get(recipe)!
+      return entry({ kind: 'folder', key: recipe, name: recipeName(recipe), models, inner: recipeEntries(recipe, models) })
     }
 
     const section = (title: string, list: readonly LemonadeModel[], empty: string) => (

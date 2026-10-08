@@ -342,8 +342,8 @@ describe('model manager', () => {
       expect(await ui.find({ key: 'use-Gemma-Chat-GGUF' })).toBeDefined()
       // Then the rest, grouped by recipe as Lemonade groups them, each model in one place only.
       expect((await ui.find({ type: 'Text', text: /^SUGGESTED/ }))?.text).toBe('SUGGESTED · 2 to download')
-      expect((await ui.find({ key: 'group-llamacpp' }))?.text).toContain('Llama.cpp GPU (1)')
-      expect((await ui.find({ key: 'group-ryzenai-llm' }))?.text).toContain('Ryzen AI LLM (1)')
+      expect((await ui.find({ key: 'group-box-llamacpp' }))?.text).toContain('Llama.cpp GPU1 · 9.00 GB')
+      expect((await ui.find({ key: 'group-box-ryzenai-llm' }))?.text).toContain('Ryzen AI LLM1 · 650 MB')
       expect(await ui.findAll({ key: 'row-Qwen3.5-4B-GGUF' })).toHaveLength(1)
       // Speech, music, models Lemonade doesn't suggest, and recipes this machine can't run stay out.
       expect(await ui.find({ key: 'group-whispercpp' })).toBeUndefined()
@@ -714,6 +714,56 @@ describe('/lemonade on and off', () => {
     await start($)
     await lemonade($, 'on')
     expect((await lemonade($, 'list')).text).toContain('Requests go to Qwen3.5-4B-GGUF via Lemonade (/lemonade on')
+  })
+})
+
+describe('model list nesting', () => {
+  /** A suggested chat model, not downloaded, for the list to nest. */
+  const suggest = (id: string, size = 1, recipe = 'llamacpp') => ({ id, size, downloaded: false, suggested: true, recipe, labels: ['chat'] })
+
+  test('a recipe opens onto makers; a maker of one stays a row', async ($, on) => {
+    const { lemonade: server } = world(on)
+    server.models.push(suggest('Phi-4-mini-instruct-GGUF'), suggest('Phi-3-mini-GGUF'), suggest('Bonsai-1.7B-gguf', 0.25))
+    await start($)
+    const ui = await manager($, 'desktop')
+    await ui.press({ key: 'group-llamacpp' })
+    expect((await ui.find({ key: 'group-box-llamacpp/phi' }))?.text).toContain('▸ Phi2 · 1.00 GB')
+    expect(await ui.find({ key: 'row-Phi-3-mini-GGUF' })).toBeUndefined()
+    // Alone of its maker: a row, no folder.
+    expect(await ui.find({ key: 'get-Bonsai-1.7B-gguf' })).toBeDefined()
+    expect(await ui.find({ key: 'group-llamacpp/bonsai' })).toBeUndefined()
+    await ui.press({ key: 'group-llamacpp/phi' })
+    expect(await ui.find({ key: 'get-Phi-3-mini-GGUF' })).toBeDefined()
+  })
+
+  test('a maker of more than eight opens onto family folders', async ($, on) => {
+    const { lemonade: server } = world(on)
+    const qwen = ['Qwen3-0.6B-GGUF', 'Qwen3-4B-GGUF', 'Qwen3-14B-GGUF', 'Qwen3.5-2B-GGUF', 'Qwen3.5-9B-GGUF', 'Qwen3.5-27B-GGUF', 'Qwen3-VL-4B-Instruct-GGUF', 'Qwen3-VL-8B-Instruct-GGUF', 'Qwen3-Coder-Next-GGUF']
+    server.models.push(...qwen.map(id => suggest(id, 2)))
+    await start($)
+    const ui = await manager($, 'desktop')
+    await ui.press({ key: 'group-llamacpp' })
+    await ui.press({ key: 'group-llamacpp/qwen' })
+    expect((await ui.find({ key: 'group-box-llamacpp/qwen/Qwen3' }))?.text).toContain('▸ Qwen33 · 2.00 GB')
+    expect(await ui.find({ key: 'group-llamacpp/qwen/Qwen3.5' })).toBeDefined()
+    expect(await ui.find({ key: 'group-llamacpp/qwen/Qwen3-VL' })).toBeDefined()
+    // A family of one stays a row.
+    expect(await ui.find({ key: 'get-Qwen3-Coder-Next-GGUF' })).toBeDefined()
+    await ui.press({ key: 'group-llamacpp/qwen/Qwen3.5' })
+    // Sizes in the order people read them: 2B, 9B, 27B.
+    // (Qwen3.5-4B-GGUF, loaded, sits under Active, not in the folder.)
+    const rows = (await ui.findAll({ type: 'Box' })).map(b => b.key).filter(k => k?.startsWith('row-Qwen3.5') && k !== 'row-Qwen3.5-4B-GGUF')
+    expect(rows).toEqual(['row-Qwen3.5-2B-GGUF', 'row-Qwen3.5-9B-GGUF', 'row-Qwen3.5-27B-GGUF'])
+  })
+
+  test('a search opens every folder down to the models it finds', async ($, on) => {
+    const { lemonade: server } = world(on)
+    server.models.push(suggest('Phi-4-mini-instruct-GGUF'), suggest('Phi-3-mini-GGUF'))
+    await start($)
+    const ui = await manager($, 'desktop')
+    await ui.input({ key: 'search', text: 'phi-3', kind: 'change' })
+    expect(await ui.find({ key: 'get-Phi-3-mini-GGUF' })).toBeDefined()
+    expect(await ui.find({ key: 'get-Phi-4-mini-instruct-GGUF' })).toBeUndefined()
   })
 })
 

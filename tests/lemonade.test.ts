@@ -150,9 +150,11 @@ function world(
       const here = lemonade.loaded.findIndex(m => m.model_name === load.model_name)
       if (here >= 0) lemonade.loaded[here] = loaded
       else {
-        // One chat slot: an unpinned model makes room, a pinned one refuses.
-        const evictable = lemonade.loaded.findIndex(m => !m.pinned)
-        if (lemonade.loaded.length >= 1 && evictable < 0) {
+        // One chat slot, as max_loaded_models 1 gives: an unpinned chat model makes room, a pinned one
+        // refuses. Speech and image models have slots of their own.
+        const chats = lemonade.loaded.filter(m => m.type === 'llm')
+        const evictable = lemonade.loaded.findIndex(m => m.type === 'llm' && !m.pinned)
+        if (chats.length >= 1 && evictable < 0) {
           return {
             status: 409,
             text: JSON.stringify({
@@ -165,7 +167,7 @@ function world(
             }),
           }
         }
-        if (lemonade.loaded.length >= 1) lemonade.loaded.splice(evictable, 1)
+        if (chats.length >= 1) lemonade.loaded.splice(evictable, 1)
         lemonade.loaded.push(loaded)
       }
       body = { model_name: load.model_name, status: 'success' }
@@ -1081,6 +1083,24 @@ describe('sharing Lemonade', () => {
     server.loadError = 'backend llamacpp:cuda is not installed'
     await start($)
     expect((await lemonade($, 'on gemma')).text).toBe("Lemonade couldn't load Gemma-Chat-GGUF: backend llamacpp:cuda is not installed")
+  })
+
+  test("the conflict names only the pinned chat models, not another app's speech or image ones", async ($, on) => {
+    const { lemonade: server } = world(on)
+    // As seen live: Whisper, SD-Turbo and a chat model, all pinned by another app.
+    server.loaded = [
+      { model_name: 'Whisper-Large-v3-Turbo', type: 'transcription', pinned: true, recipe_options: { ctx_size: 4096 } },
+      { model_name: 'SD-Turbo-GGUF', type: 'image', pinned: true, recipe_options: { ctx_size: 4096 } },
+      { model_name: 'Their-Model-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 32768 } },
+    ]
+    await start($)
+    const { text } = await lemonade($, 'on gemma')
+    expect(text).toContain("Another app has pinned Lemonade's chat models (Their-Model-GGUF), so Gemma-Chat-GGUF can't load.")
+    expect(server.loaded.map(m => [m.model_name, m.pinned])).toEqual([
+      ['Whisper-Large-v3-Turbo', true],
+      ['SD-Turbo-GGUF', true],
+      ['Their-Model-GGUF', true],
+    ])
   })
 
   test('/lemonade on says the conflict and stays off', async ($, on) => {

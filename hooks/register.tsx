@@ -609,7 +609,10 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
   }
   if (isSlotsPinned(answer)) {
     const held = await ours($)
-    const pinned = ((await loadedNow($, base)) ?? before).filter(m => m.pinned && !(m.model_name in held)).map(m => m.model_name)
+    // Only chat models hold the chat slot: a pinned speech or image model has a slot of its own.
+    const pinned = ((await loadedNow($, base)) ?? before)
+      .filter(m => m.pinned && (m.type ?? 'llm') === 'llm' && !(m.model_name in held))
+      .map(m => m.model_name)
     return {
       ok: false,
       message:

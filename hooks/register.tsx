@@ -10,9 +10,8 @@ const START_TIMEOUT_S = 60
 const offered = atom({ plugin: 'lemonclaude', key: 'offered' } as const, null as string | null)
 const routed = atom({ plugin: 'lemonclaude', key: 'routed' } as const, null as string | null)
 const saved = atom({ plugin: 'lemonclaude', key: 'saved' } as const, null as SavedEnv | null)
-const models = atom({ plugin: 'lemonclaude', key: 'models' } as const, [] as LemonadeModel[])
 const notice = atom({ plugin: 'lemonclaude', key: 'notice' } as const, '')
-const isOn = atom({ plugin: 'lemonclaude', key: 'isOn' } as const, false)
+const heldOver = atom({ plugin: 'lemonclaude', key: 'heldOver' } as const, null as string | null)
 const catalog = atom({ plugin: 'lemonclaude', key: 'catalog' } as const, [] as LemonadeModel[])
 const downloads = atom({ plugin: 'lemonclaude', key: 'downloads' } as const, {} as Record<string, DownloadState>)
 const search = atom({ plugin: 'lemonclaude', key: 'search' } as const, '')
@@ -22,7 +21,19 @@ const expanded = atom({ plugin: 'lemonclaude', key: 'expanded' } as const, [] as
 type $ = EngineInterface
 
 // Labels Lemonade gives models that are not chat LLMs, even alongside `chat`.
-const NOT_CHAT = ['transcription', 'realtime-transcription', 'image', 'tts', 'embeddings', 'reranking', 'classification']
+const NOT_CHAT = [
+  'transcription',
+  'realtime-transcription',
+  'image',
+  'tts',
+  'embeddings',
+  'reranking',
+  'classification',
+  'audio-generation',
+  'voice-design',
+  'upscaling',
+  '3d',
+]
 
 // Lemonade's own names for its recipes, as its model manager groups them.
 const RECIPES: Record<string, string> = {
@@ -40,7 +51,9 @@ async function baseUrl($: $): Promise<string> {
 
 /**
  * Lemonade's chat models, downloaded or suggested, by name; throws when the server is unreachable.
- * Models without the `chat` label (speech, images, music) are no use to Claude Code.
+ * Speech, image and music models are no use to Claude Code. A suggested model counts when Lemonade
+ * labels it `chat`; a downloaded one also when it has no label saying otherwise, as a model pulled
+ * without labels gets its recipe's default, chat for an LLM recipe.
  */
 export async function listCatalog($: $, base: string): Promise<LemonadeModel[]> {
   const listed = await $.http.fetch(`${base}/api/v1/models?show_all=true`)
@@ -62,8 +75,8 @@ export async function listCatalog($: $, base: string): Promise<LemonadeModel[]> 
   }
 
   return data
-    .filter(m => (m.labels ?? []).includes('chat') && !(m.labels ?? []).some(l => NOT_CHAT.includes(l)))
-    .filter(m => m.downloaded !== false || m.suggested !== false)
+    .filter(m => !(m.labels ?? []).some(l => NOT_CHAT.includes(l)))
+    .filter(m => (m.downloaded !== false ? true : m.suggested !== false && (m.labels ?? []).includes('chat')))
     .map(m => ({
       id: m.id,
       size: m.size,
@@ -76,24 +89,27 @@ export async function listCatalog($: $, base: string): Promise<LemonadeModel[]> 
     .sort((a, b) => a.id.localeCompare(b.id, undefined, { sensitivity: 'base' }))
 }
 
-/**
- * Refreshes the catalog and the downloaded models in it, tool-calling ones first; on failure keeps
- * the last ones and says why.
- */
+/** The catalog's downloaded models, the ones requests can go to, tool-calling ones first. */
+function downloadedOf(all: readonly LemonadeModel[]): LemonadeModel[] {
+  return all.filter(m => m.isDownloaded).sort((a, b) => Number(b.hasTools) - Number(a.hasTools) || a.id.localeCompare(b.id))
+}
+
+/** The downloaded models as last fetched. */
+async function models($: $): Promise<LemonadeModel[]> {
+  return downloadedOf(await read($, catalog))
+}
+
+/** Refreshes the catalog and resolves its downloaded models; on failure keeps the last ones and says why. */
 async function refresh($: $): Promise<LemonadeModel[]> {
   const base = await baseUrl($)
   try {
     const all = await listCatalog($, base)
-    const list = all
-      .filter(m => m.isDownloaded)
-      .sort((a, b) => Number(b.hasTools) - Number(a.hasTools) || a.id.localeCompare(b.id))
     await update($, catalog, () => all)
-    await update($, models, () => list)
     await update($, notice, () => '')
-    return list
+    return downloadedOf(all)
   } catch (err) {
     await update($, notice, () => `Lemonade isn't reachable at ${base}: ${(err as Error).message}`)
-    return read($, models)
+    return models($)
   }
 }
 
@@ -113,27 +129,33 @@ async function pollDownloads($: $): Promise<boolean> {
     complete?: boolean
     error?: string
   }>
-  const before = await read($, downloads)
-  const now: Record<string, DownloadState> = {}
-  const finished: string[] = []
-  for (const job of jobs) {
-    if (job.complete || job.status === 'completed') {
-      if (before[job.model_name]) finished.push(job.model_name)
-      continue
+  let finished: string[] = []
+  // Merged into what is there now, not a copy read earlier: a press of Download can land in between.
+  const now = await update($, downloads, before => {
+    finished = []
+    const next: Record<string, DownloadState> = {}
+    for (const job of jobs) {
+      if (job.complete || job.status === 'completed') {
+        if (before[job.model_name]) finished.push(job.model_name)
+        continue
+      }
+      if (job.status === 'cancelled') continue
+      next[job.model_name] = { percent: job.percent ?? 0, status: job.status, ...(job.error ? { error: job.error } : {}) }
     }
-    if (job.status === 'cancelled') continue
-    now[job.model_name] = { percent: job.percent ?? 0, status: job.status, ...(job.error ? { error: job.error } : {}) }
-  }
-  // A download we saw running that is gone from the list finished while nobody looked.
-  for (const [id, d] of Object.entries(before)) {
-    if (d.status === 'downloading' && !(id in now) && !finished.includes(id)) finished.push(id)
-  }
-  await update($, downloads, () => now)
+    for (const [id, d] of Object.entries(before)) {
+      if (id in next || finished.includes(id)) continue
+      // A pull on its way to Lemonade isn't listed yet, and a pull Lemonade refused never will be.
+      if (d.status === 'starting' || d.status === 'error') next[id] = d
+      // One Lemonade listed and dropped finished between two polls.
+      else if (d.status === 'downloading') finished.push(id)
+    }
+    return next
+  })
   if (finished.length > 0) {
     await refresh($)
     $.ui.toast(`Downloaded ${finished.join(', ')}. Press Use in /lemonade to switch to it.`)
   }
-  return jobs.some(j => j.running) || Object.values(now).some(d => d.status === 'downloading')
+  return jobs.some(j => j.running) || Object.values(now).some(d => d.status === 'downloading' || d.status === 'starting')
 }
 
 // One poll at a time while Lemonade downloads; a module variable, so a reload starts it again.
@@ -165,10 +187,22 @@ function tags(m: LemonadeModel): string {
   return [m.hasTools ? 'tools' : '', ...['vision', 'reasoning', 'coding'].filter(l => m.labels.includes(l))].filter(Boolean).join(' · ')
 }
 
+/** The message in a Lemonade error body (`{ error }` or `{ message }`), if it has one. */
+function pullError(text: string): string | undefined {
+  try {
+    const body = JSON.parse(text) as { error?: unknown; message?: unknown }
+    const said = body.error ?? body.message
+    return typeof said === 'string' ? said : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** Starts a server-owned download of `id`, which Lemonade keeps going whatever happens to this session. */
 async function download($: $, id: string): Promise<void> {
   const base = await baseUrl($)
-  await update($, downloads, d => ({ ...d, [id]: { percent: 0, status: 'downloading' } }))
+  // `starting` until Lemonade has the job: a poll before then must not take its absence for a finish.
+  await update($, downloads, d => ({ ...d, [id]: { percent: 0, status: 'starting' } }))
   const started = await $.http
     .fetch(`${base}/api/v1/pull`, {
       method: 'POST',
@@ -177,9 +211,11 @@ async function download($: $, id: string): Promise<void> {
     })
     .catch((err: Error) => ({ ok: false, status: 0, text: err.message }))
   if (!started.ok) {
-    await update($, downloads, d => ({ ...d, [id]: { percent: 0, status: 'error', error: `Lemonade answered ${started.status}` } }))
+    const error = pullError(started.text) ?? (started.status ? `Lemonade answered ${started.status}` : started.text)
+    await update($, downloads, d => ({ ...d, [id]: { percent: 0, status: 'error', error } }))
     return
   }
+  await update($, downloads, d => (d[id]?.status === 'starting' ? { ...d, [id]: { percent: 0, status: 'downloading' } } : d))
   watchDownloads($)
 }
 
@@ -260,7 +296,7 @@ export function pick(list: LemonadeModel[], query: string): LemonadeModel | stri
 }
 
 function describeModel(m: LemonadeModel): string {
-  return [m.size ? `${m.size} GB` : '', m.hasTools ? 'tools' : 'no tools', m.isLoaded ? 'loaded' : ''].filter(Boolean).join(', ')
+  return [formatSize(m.size), m.hasTools ? 'tools' : 'no tools', m.isLoaded ? 'loaded' : ''].filter(Boolean).join(', ')
 }
 
 /**
@@ -269,7 +305,7 @@ function describeModel(m: LemonadeModel): string {
  */
 async function offer($: $, m: LemonadeModel, isUp = true, canStart = false): Promise<void> {
   const down = canStart ? 'Lemonade not running, starts when picked' : 'Lemonade not running, start it first'
-  const detail = isUp ? describeModel(m) : `${m.size ? `${m.size} GB, ` : ''}${down}`
+  const detail = isUp ? describeModel(m) : [formatSize(m.size), down].filter(Boolean).join(', ')
   await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION', m.id)
   await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION_NAME', `🍋 ${m.id}`)
   await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION', `Local via Lemonade · ${detail}`)
@@ -328,12 +364,17 @@ export async function route($: $, model: string | null): Promise<void> {
 
 /**
  * The Lemonade model the session runs on, or null when it runs on Claude: the offered model while
- * `/lemonade on` holds, else the session's model when it is a Lemonade one.
+ * `/lemonade on` holds, else the session's model when it is a Lemonade one. Picking another model in
+ * a model picker ends `/lemonade on`, as picking a Claude model leaves 🍋 in the terminal's.
  */
 async function lemonadeModelOf($: $, sessionModel: string): Promise<string | null> {
-  if (await read($, isOn)) return read($, offered)
+  const over = await read($, heldOver)
+  if (over !== null) {
+    if (sessionModel === over) return read($, offered)
+    await update($, heldOver, () => null as string | null)
+  }
   if (sessionModel === (await read($, offered))) return sessionModel
-  return (await read($, models)).some(m => m.id === sessionModel) ? sessionModel : null
+  return (await models($)).some(m => m.id === sessionModel) ? sessionModel : null
 }
 
 /** Offers the model `query` names; resolves that model, or why there is none. */
@@ -361,7 +402,7 @@ function caveats(m: LemonadeModel): string {
 export async function choose($: $, query: string): Promise<string> {
   const found = await offerQuery($, query)
   if (typeof found === 'string') return found
-  const how = (await read($, isOn))
+  const how = (await read($, heldOver)) !== null
     ? 'Requests go to it now; /lemonade off goes back.'
     : `Pick it there (or /model ${found.id}, or /lemonade on); pick a Claude model to go back.`
   return `The model selector now offers 🍋 ${found.id}. ${how}${caveats(found)}`
@@ -369,22 +410,24 @@ export async function choose($: $, query: string): Promise<string> {
 
 /**
  * `/lemonade on [model]`: every request goes to the offered Lemonade model, whatever the session's
- * model, until `/lemonade off`. For pickers that don't list the entry, such as the desktop app's.
+ * model, until `/lemonade off` or another pick in a model picker. For pickers that don't list the
+ * entry, such as the desktop app's.
  */
 async function switchOn($: $, query: string): Promise<string> {
   const named = query ? await offerQuery($, query) : undefined
   if (typeof named === 'string') return named
   const id = await read($, offered)
   if (!id) return 'The model selector offers no Lemonade model. Name one: /lemonade on <model>.'
-  await update($, isOn, () => true)
+  const sessionModel = await $.session.model()
+  await update($, heldOver, () => sessionModel as string | null)
   await route($, id)
-  const m = named ?? (await read($, models)).find(x => x.id === id)
-  return `Requests now go to 🍋 ${id} via Lemonade, whatever the model selector shows. /lemonade off goes back.${m ? caveats(m) : ''}`
+  const m = named ?? (await models($)).find(x => x.id === id)
+  return `Requests now go to 🍋 ${id} via Lemonade. /lemonade off, or picking another model, goes back.${m ? caveats(m) : ''}`
 }
 
 /** `/lemonade off`: requests follow the session's model again. */
 async function switchOff($: $): Promise<string> {
-  await update($, isOn, () => false)
+  await update($, heldOver, () => null as string | null)
   const model = await lemonadeModelOf($, await $.session.model())
   await route($, model)
   return model
@@ -392,12 +435,12 @@ async function switchOff($: $): Promise<string> {
     : 'Requests follow the model selector again, so Claude answers.'
 }
 
-async function describe($: $): Promise<string> {
-  const list = await refresh($)
+/** What `/lemonade` and `/lemonade list` print, from the downloaded models `refresh` just fetched. */
+async function describe($: $, list: readonly LemonadeModel[]): Promise<string> {
   const problem = await read($, notice)
   const now = await read($, routed)
   const shown = await read($, offered)
-  const held = (await read($, isOn)) ? ' (/lemonade on; /lemonade off goes back)' : ''
+  const held = (await read($, heldOver)) !== null ? ' (/lemonade on; /lemonade off goes back)' : ''
   return [
     now ? `Requests go to ${now} via Lemonade${held}.` : 'Claude answers; pick 🍋 in the model selector, or /lemonade on, to use Lemonade.',
     shown ? `The selector offers: 🍋 ${shown}` : 'The selector offers no Lemonade model yet.',
@@ -437,7 +480,7 @@ export const register: Register = on => {
 
   // Hand the environment back when the conversation ends; the next step routes again from the session's model.
   on('session.end', async ($, e, next) => {
-    await update($, isOn, () => false)
+    await update($, heldOver, () => null as string | null)
     await route($, null)
     return next(e)
   })
@@ -445,16 +488,18 @@ export const register: Register = on => {
   on('command.run', { command: 'lemonade' }, async ($, e) => {
     const arg = e.args.trim()
     const [word = '', ...rest] = arg.split(/\s+/)
-    if (arg === 'list' || arg === 'status') return { text: await describe($) }
+    if (arg === 'list' || arg === 'status') return { text: await describe($, await refresh($)) }
     if (arg === 'off') return { text: await switchOff($) }
     await ensureServer($)
     if (word === 'on') return { text: await switchOn($, rest.join(' ')) }
     if (arg) return { text: await choose($, arg) }
 
     // Bare, the output row draws as the model manager (the CommandOutput hook); the text is what the model reads.
-    await refresh($)
+    // A new list starts unfiltered: its search box starts empty.
+    await update($, search, () => '')
+    const list = await refresh($)
     if (await pollDownloads($)) watchDownloads($)
-    return { text: await describe($) }
+    return { text: await describe($, list) }
   })
 
   // Every model request follows the session's model: main loop and subagents alike go to Lemonade while it is picked.
@@ -477,38 +522,48 @@ export const register: Register = on => {
     if (e.props.args.trim() !== '' || e.props.isErrored) return next(e)
     const { Box, Text, Button, Input } = $.ui.resolve(e)
     const all = await read($, catalog)
-    const typed = await read($, search)
-    const query = typed.trim().toLowerCase()
+    const query = (await read($, search)).trim().toLowerCase()
     const onlyDownloaded = await read($, isDownloadedOnly)
     const open = await read($, expanded)
     const jobs = await read($, downloads)
     const now = await read($, routed)
-    const held = await read($, isOn)
+    const held = (await read($, heldOver)) !== null
     const problem = await read($, notice)
 
-    // A handler that says how it went in a toast.
+    // A handler that says how it went, or what went wrong, in a toast.
     const act = (work: () => Promise<string | void>) => () =>
-      void work().then(text => {
-        if (text) $.ui.toast(text)
-      })
+      void work().then(
+        text => {
+          if (text) $.ui.toast(text)
+        },
+        (err: unknown) => $.ui.toast(`LemonClaude: ${err instanceof Error ? err.message : String(err)}`),
+      )
 
-    const action = (m: LemonadeModel) => {
+    // `at` keeps keys unique: a loaded model is drawn under Active models and again in its group.
+    const action = (m: LemonadeModel, at: string) => {
       if (m.id === now) return <Text color="green">In use</Text>
-      if (m.isDownloaded) return <Button key={`use-${m.id}`} label="Use" onPress={act(() => switchOn($, m.id))} />
+      if (m.isDownloaded) return <Button key={`${at}use-${m.id}`} label="Use" onPress={act(() => switchOn($, m.id))} />
       const job = jobs[m.id]
+      if (job?.status === 'starting') return <Text dimColor>Starting download…</Text>
       if (job?.status === 'downloading' || job?.status === 'paused') {
         return <Text dimColor>{`${job.status === 'paused' ? 'Paused' : 'Downloading'} ${Math.round(job.percent)}%`}</Text>
       }
-      const label = job?.status === 'error' ? 'Retry download' : 'Download'
-      return <Button key={`get-${m.id}`} label={label} onPress={act(() => download($, m.id))} />
+      const retry = <Button key={`${at}get-${m.id}`} label={job ? 'Retry download' : 'Download'} onPress={act(() => download($, m.id))} />
+      if (!job) return retry
+      return (
+        <Box flexDirection="row" gap={1}>
+          <Text color="red">{`Download failed${job.error ? `: ${job.error}` : ''}`}</Text>
+          {retry}
+        </Box>
+      )
     }
 
-    const row = (m: LemonadeModel) => (
-      <Box key={`row-${m.id}`} flexDirection="row" gap={1}>
+    const row = (at: string) => (m: LemonadeModel) => (
+      <Box key={`${at}row-${m.id}`} flexDirection="row" gap={1}>
         {m.isLoaded ? <Text color="green">●</Text> : <Text dimColor={!m.isDownloaded}>●</Text>}
         <Text bold={m.isDownloaded}>{m.id}</Text>
         <Text dimColor>{[formatSize(m.size), tags(m)].filter(Boolean).join(' · ')}</Text>
-        {action(m)}
+        {action(m, at)}
       </Box>
     )
 
@@ -526,7 +581,7 @@ export const register: Register = on => {
       return (
         <Box key={`group-box-${recipe}`} flexDirection="column">
           <Button key={`group-${recipe}`} plain label={`${isOpen ? '▾' : '▸'} ${recipeName(recipe)} (${list.length})`} onPress={toggle} />
-          {isOpen ? <Box flexDirection="column" paddingLeft={2}>{list.map(row)}</Box> : null}
+          {isOpen ? <Box flexDirection="column" paddingLeft={2}>{list.map(row(''))}</Box> : null}
         </Box>
       )
     }
@@ -540,10 +595,10 @@ export const register: Register = on => {
         </Box>
         {problem ? <Text color="red">{problem}</Text> : null}
         <Box flexDirection="row" gap={1}>
+          {/* Uncontrolled: the field keeps what is typed, and a redraw (a download's progress) never resets it. */}
           <Input
             key="search"
             placeholder="Search models..."
-            value={typed}
             onInput={value => void update($, search, () => value)}
             onSubmit={value => void update($, search, () => value)}
           />
@@ -554,7 +609,7 @@ export const register: Register = on => {
           />
         </Box>
         <Text bold dimColor>{`ACTIVE MODELS · ${loaded.length} loaded`}</Text>
-        {loaded.length > 0 ? <Box flexDirection="column">{loaded.map(row)}</Box> : <Text dimColor>No models loaded</Text>}
+        {loaded.length > 0 ? <Box flexDirection="column">{loaded.map(row('active-'))}</Box> : <Text dimColor>No models loaded</Text>}
         <Text bold dimColor>{`${onlyDownloaded ? 'DOWNLOADED' : 'SUGGESTED'} MODELS · ${shown.length} shown`}</Text>
         {recipes.length > 0 ? <Box flexDirection="column">{recipes.map(group)}</Box> : <Text dimColor>No models match.</Text>}
       </Box>

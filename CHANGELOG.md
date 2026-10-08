@@ -8,7 +8,7 @@ All notable changes to LemonClaude are listed here. The format follows [Keep a C
 
 - On Windows, starting Lemonade Server when a request is about to go to it and it isn't running, then waiting up to 60 seconds for it. `/lemonade` and `/lemonade <model>` start it too. The server is started detached, so it keeps running after the session. Set `LEMONCLAUDE_AUTOSTART=0` to turn this off.
 - The selector entry says "starts when picked" while Lemonade is down and LemonClaude can start it.
-- `/lemonade on [model]` sends every request to the offered Lemonade model, whatever the model selector shows, and `/lemonade off` hands routing back to the selector. This is how to use Lemonade from the desktop app, whose model picker lists only Claude models. Ending the session turns it off.
+- `/lemonade on [model]` sends every request to the offered Lemonade model, whatever the model selector shows, and `/lemonade off`, or picking another model in a model picker, hands routing back to the selector. This is how to use Lemonade from the desktop app, whose model picker lists only Claude models. Ending the session turns it off.
 
 ### Changed
 

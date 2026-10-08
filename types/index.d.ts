@@ -17,7 +17,7 @@ export type LemonadeModel = {
 /** A model download Lemonade runs on the server, as `/api/v1/downloads` reports it. */
 export type DownloadState = {
   percent: number
-  /** `downloading`, `paused` or `error`. */
+  /** `starting` (asked, Lemonade not yet listing it), `downloading`, `paused` or `error`. */
   status: string
   error?: string
 }
@@ -36,11 +36,12 @@ declare module 'claude-code' {
       /** The Lemonade model requests go to now, or null while Claude answers. */
       routed: string | null
       saved: SavedEnv | null
-      /** The downloaded chat models, tool-calling ones first. */
-      models: LemonadeModel[]
       notice: string
-      /** True while /lemonade on sends every request to the offered model, whatever the session's model. */
-      isOn: boolean
+      /**
+       * While /lemonade on holds, the session model it holds over, else null: every request goes to the
+       * offered model until the session's model changes from this one or /lemonade off.
+       */
+      heldOver: string | null
       /** Every chat model Lemonade lists, downloaded or suggested, by name. */
       catalog: LemonadeModel[]
       /** Downloads under way, by model id. */

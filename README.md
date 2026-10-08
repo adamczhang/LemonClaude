@@ -59,7 +59,7 @@ First, download a chat model with Lemonade, for example with `lemonade pull`. On
 The desktop app's model picker lists only Claude models, so the 🍋 entry doesn't appear there. Use LemonClaude's model manager or its commands instead:
 
 1. Type `/lemonade` to open the model manager (below) and press **Use** on a model. Or type `/lemonade on` to use the offered model. Every request now goes to Lemonade, subagents included, and the status line shows `🍋 <model> (Lemonade)`. The picker keeps showing the Claude model it had.
-2. Press **Back to Claude**, or type `/lemonade off`, to go back to that Claude model.
+2. Press **Back to Claude**, type `/lemonade off`, or pick any model in the model picker to go back.
 
 These work in the terminal too.
 
@@ -70,7 +70,7 @@ Bare `/lemonade` draws a model list in the transcript, laid out like the Model M
 - **Search** box and a **Downloaded only** switch.
 - **Active models:** the models Lemonade has loaded in memory, marked with a green dot.
 - **Suggested models:** every chat model Lemonade lists, grouped by recipe as Lemonade groups them (Llama.cpp GPU, Ryzen AI LLM, …). Press a group to open it. Each row shows the model's size and tags such as `tools`, `vision` and `reasoning`.
-- **Use** switches requests to a downloaded model, as `/lemonade on <model>` does.
+- **Use** switches requests to a downloaded model, as `/lemonade on <model>` does. A failed download says why, with a **Retry download** button.
 - **Download** asks Lemonade to download a model. Lemonade runs the download itself, so it keeps going if you close the session, and the row shows its progress. When it finishes, the row offers **Use**.
 
 The list shows only chat models, the ones Claude Code can talk to. Lemonade's speech, image, music and embedding models stay in Lemonade's app.
@@ -81,7 +81,7 @@ Claude Code allows only one custom entry in the selector. LemonClaude offers the
 
 | Command | What it does |
 | --- | --- |
-| `/lemonade on` | Sends every request to the offered Lemonade model, whatever the model selector shows |
+| `/lemonade on` | Sends every request to the offered Lemonade model, whatever the model selector shows, until `/lemonade off` or you pick another model |
 | `/lemonade on <model>` | Offers that model and switches to it |
 | `/lemonade off` | Requests follow the model selector again |
 | `/lemonade` | Opens the model manager: every Lemonade chat model, to use or download |

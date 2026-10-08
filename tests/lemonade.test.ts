@@ -15,7 +15,17 @@ const MODELS = [
 const HEALTH = { all_models_loaded: [{ model_name: 'Qwen3.5-4B-GGUF' }] }
 
 /** Lemonade's side of a world: its catalog, the download jobs /api/v1/downloads lists, and each pull body. */
-type Lemonade = { models: typeof MODELS; jobs: Array<Record<string, unknown>>; pulls: unknown[] }
+type Lemonade = {
+  models: Array<{ id: string; size: number; downloaded: boolean; suggested: boolean; recipe: string; labels: string[] }>
+  jobs: Array<Record<string, unknown>>
+  pulls: unknown[]
+  /** Every path fetched, in order. */
+  fetched: string[]
+  /** Held until it resolves: a pull still on its way to Lemonade. */
+  pullGate?: Promise<void>
+  /** Lemonade refuses each pull with this error. */
+  pullError?: string
+}
 
 type World = {
   env: Map<string, string>
@@ -72,10 +82,15 @@ function world(
     if (!opts.startFails) isUp = true
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  const lemonade: Lemonade = { models: JSON.parse(JSON.stringify(MODELS)), jobs: [], pulls: [] }
-  on('http.fetch', ($, e) => {
+  const lemonade: Lemonade = { models: JSON.parse(JSON.stringify(MODELS)), jobs: [], pulls: [], fetched: [] }
+  on('http.fetch', async ($, e) => {
     if (!isUp) return { deny: 'connection refused' }
     const path = e.url.replace(/^https?:\/\/[^/]+/, '')
+    lemonade.fetched.push(path)
+    if (path === '/api/v1/pull' && lemonade.pullError) {
+      return { value: { status: 400, ok: false, headers: {}, text: JSON.stringify({ error: lemonade.pullError }) } }
+    }
+    if (path === '/api/v1/pull') await lemonade.pullGate
     let body: unknown
     if (path === '/api/v1/models?show_all=true') body = { data: lemonade.models }
     else if (path === '/api/v1/health') body = HEALTH
@@ -140,7 +155,7 @@ describe('model selector entry', () => {
     const { env } = world(on, {}, { reachable: false, store: { lastOffer } })
     await start($)
     expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Gemma-Chat-GGUF')
-    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION')).toBe('Local via Lemonade · 2.1 GB, Lemonade not running, start it first')
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION')).toBe('Local via Lemonade · 2.10 GB, Lemonade not running, start it first')
   })
 
   test('offers the default model while Lemonade is down and nothing is remembered', async ($, on) => {
@@ -193,20 +208,20 @@ describe('model selector entry', () => {
     await start($)
     const { text } = await lemonade($, 'list')
     expect(text).toContain('* Qwen3.5-4B-GGUF (3.34 GB, tools, loaded)')
-    expect(text).toContain('Gemma-Chat-GGUF (2.1 GB, no tools)')
+    expect(text).toContain('Gemma-Chat-GGUF (2.10 GB, no tools)')
     expect(text).not.toContain('Whisper')
   })
 
 })
 
 /** Mounts bare /lemonade's output row, where the model manager draws, on `surface`. */
-async function manager($: Engine, surface: 'terminal' | 'desktop', args = '') {
+async function manager($: Engine, surface: 'terminal' | 'desktop', args = '', requestId = 'm1') {
   const { text } = await lemonade($, args)
   return $.ui.mount({
     plugin: 'lemonclaude',
     surface,
     component: 'CommandOutput',
-    requestId: 'm1',
+    requestId,
     props: { command: 'lemonade', args, text: text ?? '', isErrored: false },
     viewport: { columns: 100, rows: 40 },
   })
@@ -225,11 +240,14 @@ describe('model manager', () => {
       expect(await ui.find({ key: 'group-acestep' })).toBeUndefined()
       expect(await ui.find({ text: /Unlisted-GGUF/ })).toBeUndefined()
       // The loaded model heads the list; groups open on a press.
-      expect(await ui.find({ key: 'row-Qwen3.5-4B-GGUF' })).toBeDefined()
+      expect(await ui.find({ key: 'active-row-Qwen3.5-4B-GGUF' })).toBeDefined()
       expect(await ui.find({ key: 'row-Not-Pulled-GGUF' })).toBeUndefined()
       await ui.press({ key: 'group-llamacpp' })
       expect(await ui.find({ key: 'get-Not-Pulled-GGUF' })).toBeDefined()
       expect(await ui.find({ key: 'use-Gemma-Chat-GGUF' })).toBeDefined()
+      // Drawn twice, once under Active models and once in its group, under keys of its own each time.
+      expect(await ui.findAll({ key: 'use-Qwen3.5-4B-GGUF' })).toHaveLength(1)
+      expect(await ui.findAll({ key: 'active-use-Qwen3.5-4B-GGUF' })).toHaveLength(1)
     })
 
     test(`${surface}: Use sends requests to that model, and Back to Claude returns`, async ($, on) => {
@@ -266,6 +284,51 @@ describe('model manager', () => {
     await clock.advance(1000)
     expect(await ui.find({ key: 'use-Not-Pulled-GGUF' })).toBeDefined()
     expect(toasts.some(t => t.includes('Downloaded Not-Pulled-GGUF'))).toBe(true)
+  })
+
+  test('a download asked while another runs is not taken for finished before Lemonade lists it', async ($, on) => {
+    const clock = mock.clock(on)
+    const { lemonade: server, toasts } = world(on)
+    await start($)
+    const ui = await manager($, 'desktop')
+    await ui.press({ key: 'group-llamacpp' })
+    await ui.press({ key: 'group-ryzenai-llm' })
+    await ui.press({ key: 'get-Not-Pulled-GGUF' })
+
+    let release = () => {}
+    server.pullGate = new Promise(resolve => (release = resolve))
+    const pressing = ui.press({ key: 'get-OLMo-1B-Hybrid' })
+    // A poll while the second pull is on its way: Lemonade lists only the first.
+    await clock.advance(1000)
+    expect(toasts.some(t => t.includes('Downloaded OLMo'))).toBe(false)
+    expect((await ui.find({ key: 'row-OLMo-1B-Hybrid' }))?.text).toContain('Starting download')
+    release()
+    await pressing
+    await clock.advance(1000)
+    expect((await ui.find({ key: 'row-OLMo-1B-Hybrid' }))?.text).toContain('Downloading 0%')
+  })
+
+  test('a refused download says why and offers to retry', async ($, on) => {
+    const { lemonade: server } = world(on)
+    server.pullError = 'Not enough disk space'
+    await start($)
+    const ui = await manager($, 'desktop')
+    await ui.press({ key: 'group-llamacpp' })
+    await ui.press({ key: 'get-Not-Pulled-GGUF' })
+    const row = (await ui.find({ key: 'row-Not-Pulled-GGUF' }))?.text
+    expect(row).toContain('Download failed: Not enough disk space')
+    expect(row).toContain('Retry download')
+  })
+
+  test('bare /lemonade fetches the catalog once and starts with an empty search', async ($, on) => {
+    const { lemonade: server } = world(on)
+    await start($)
+    const first = await manager($, 'desktop')
+    await first.input({ key: 'search', text: 'olmo', kind: 'change' })
+    server.fetched.length = 0
+    const ui = await manager($, 'desktop', '', 'm2')
+    expect(server.fetched.filter(p => p.startsWith('/api/v1/models'))).toHaveLength(1)
+    expect(await ui.find({ key: 'group-llamacpp' })).toBeDefined()
   })
 
   test('the search box filters and opens the groups it leaves', async ($, on) => {
@@ -449,6 +512,22 @@ describe('/lemonade on and off', () => {
     expect(asked).toEqual(['Gemma-Chat-GGUF @ http://127.0.0.1:13305'])
   })
 
+  test('picking another model in a model picker ends /lemonade on', async ($, on) => {
+    const { session, asked } = world(on)
+    await start($)
+    await lemonade($, 'on')
+    await step($)
+    session.model = 'claude-sonnet-5-5'
+    await step($, session.model)
+    session.model = 'claude-opus-5-5'
+    await step($)
+    expect(asked).toEqual([
+      'Qwen3.5-4B-GGUF @ http://127.0.0.1:13305',
+      'claude-sonnet-5-5 @ default',
+      'claude-opus-5-5 @ default',
+    ])
+  })
+
   test('/lemonade off leaves a session whose selector has 🍋 on Lemonade', async ($, on) => {
     const { session, asked } = world(on)
     await start($)
@@ -483,6 +562,18 @@ describe('/lemonade on and off', () => {
     await start($)
     await lemonade($, 'on')
     expect((await lemonade($, 'list')).text).toContain('Requests go to Qwen3.5-4B-GGUF via Lemonade (/lemonade on')
+  })
+})
+
+describe('which models count', () => {
+  test('a downloaded model pulled without labels is one requests can go to', async ($, on) => {
+    const { asked, lemonade: server } = world(on)
+    server.models.push({ id: 'user.Phi-4-Mini-GGUF', size: 2.5, downloaded: true, suggested: false, recipe: 'llamacpp', labels: [] })
+    await start($)
+    expect((await lemonade($, 'phi')).text).toContain('now offers 🍋 user.Phi-4-Mini-GGUF')
+    await lemonade($, 'on')
+    await step($)
+    expect(asked).toEqual(['user.Phi-4-Mini-GGUF @ http://127.0.0.1:13305'])
   })
 })
 

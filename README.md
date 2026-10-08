@@ -27,7 +27,7 @@ LemonClaude fills that gap. Pick 🍋 and the next request goes to the model on 
 
 - **🍋 in the model selector.** In the terminal, a Lemonade model sits next to Opus, Sonnet and Haiku.
 - **A model manager inside Claude Code.** `/lemonade` lists every chat model Lemonade offers, laid out like Lemonade's own model manager. It shows what's loaded, what's downloaded and ready, and what you can download, with search and live download progress.
-- **Omni bundles.** A Lemonade bundle pairs a chat model with image and speech models, so the local model can do what Claude can't: draw a picture, or speak. LemonClaude runs Claude Code on a bundle and saves the images and audio it makes as files. See [Omni bundles](#omni-bundles).
+- **Any Lemonade chat model, LMX-Omni included.** An Omni model pairs a chat model with image and speech models, so it can draw a picture or speak, which Claude can't. You pick it like any other.
 - **Works in the desktop app.** The desktop app's picker lists only Claude models, so `/lemonade on` and the model manager's **Use** button switch there instead.
 - **Starts Lemonade for you.** On Windows, if Lemonade Server isn't running when a request needs it, LemonClaude starts it.
 - **A good neighbour.** It loads its model with a bounded window and pins it while in use. It never touches another app's models, and when another app holds Lemonade's chat slot it says exactly which one. See [Sharing Lemonade with other apps](#sharing-lemonade-with-other-apps).
@@ -47,7 +47,7 @@ LemonClaude fills that gap. Pick 🍋 and the next request goes to the model on 
 | [Claude Code](https://claude.com/claude-code) | 2.1.287 or later (the mod API is early access) |
 | [Lemonade Server](https://github.com/lemonade-sdk/lemonade) | 2026.40.0 or later, which serves the Anthropic-compatible `/v1/messages` |
 | A downloaded chat model | For Claude Code's tools to work, pick one Lemonade labels `tool-calling` |
-| [Node.js](https://nodejs.org) 18 or later | Only for Omni bundles, which run through a small proxy |
+| [Node.js](https://nodejs.org) 18 or later | Only for Omni models such as LMX-Omni (see below) |
 
 LemonClaude was built and tested on Windows 11, on an AMD Ryzen AI laptop with an NVIDIA GPU. Apart from starting Lemonade Server, which is Windows only, it runs entirely inside Claude Code, so it should work anywhere Claude Code and Lemonade run.
 
@@ -120,21 +120,14 @@ The list shows only chat models, the ones Claude Code can talk to. Lemonade's sp
 | `/lemonade off` | Requests follow the model selector again |
 | `/lemonade <model>` | Offers a downloaded model in the selector. It takes the exact id or any unique part of it, such as `/lemonade gemma` |
 | `/lemonade list` | Lists the downloaded models, what the selector offers, and where requests go now |
-| `/lemonade bundle <name> <models…>` | Makes an Omni bundle, `user.<name>`, of downloaded models with a chat model among them, such as `/lemonade bundle MyKit Qwen3.5-4B-GGUF SD-Turbo-GGUF` |
-| `/lemonade unbundle <name>` | Removes a bundle you made. Its models stay downloaded |
 
 Claude Code allows only one custom entry in the selector. LemonClaude offers the model you chose last time. The first time, it offers the first downloaded model that supports tool calling. If requests already go to Lemonade, choosing another model moves them to it at once.
 
-### Omni bundles
+### Omni models
 
-A Lemonade Omni bundle is several models used as one: a chat model, plus models that make images, edit them or speak. Lemonade runs the bundle itself. The chat model decides when to draw or speak, Lemonade runs that model, and the reply comes back with the picture or the audio in it. Claude doesn't make images; a bundle does.
+LMX-Omni and other Omni models are several models Lemonade runs as one: a chat model, plus models that make images or speech. You pick one like any model. Images and audio it makes are saved as files in `~/.lemonclaude/media`, and the reply links them instead of carrying the data into the conversation.
 
-- **Use one** like any model: **Use** in `/lemonade` (they're in the Lemonade folder, tagged `bundle`), or `/lemonade on <bundle>`. The status line reads `🍋 <bundle> (Lemonade Omni)`.
-- **Make your own** from models you have: `/lemonade bundle MyKit Qwen3.5-4B-GGUF SD-Turbo-GGUF`. Only downloaded models go in, since a bundle made of others would download them.
-- **Images and audio are saved as files**, in `~/.lemonclaude/media` (`LEMONCLAUDE_MEDIA_DIR` changes it). The reply links them, such as `![generated image](file:///…/2026-10-08T21-02-00-028Z-cd8401e1.png)`, instead of carrying hundreds of kilobytes of image data into the conversation.
-- **Claude Code's tools still work.** The bundle can read files, edit and run commands as any model can, beside drawing and speaking.
-
-How: Lemonade runs bundles only on its OpenAI-style endpoint, and Claude Code speaks Anthropic's. When requests go to a bundle, LemonClaude starts a small proxy for the session (`proxy/omni-proxy.mjs`, on Node). It takes Claude Code's request as sent, with its system prompt and every tool's schema, asks Lemonade, and answers in Anthropic's format. Requests to a single model still go straight to Lemonade.
+One difference sits underneath: Lemonade runs Omni models only on its OpenAI-style endpoint, and Claude Code speaks Anthropic's. So for an Omni model, LemonClaude starts a small proxy for the session (`proxy/omni-proxy.mjs`, on Node.js) that translates between the two. Without Node.js, LemonClaude says so and stays on the current model.
 
 ### When Lemonade isn't running
 
@@ -153,7 +146,6 @@ If Lemonade still doesn't answer, a toast says so and suggests picking a Claude 
 | `LEMONCLAUDE_LEMONADE_MODEL` | `Qwen3.5-4B-GGUF` | The model to offer while Lemonade is down and no earlier choice is remembered |
 | `LEMONCLAUDE_AUTOSTART` | on | Set to `0` so LemonClaude never starts Lemonade Server |
 | `LEMONCLAUDE_CTX_SIZE` | `65536` | The context window LemonClaude loads models with, in tokens (at least 4096). 64K holds Claude Code's own prompt and tools, about 20–30K tokens, plus a conversation |
-| `LEMONCLAUDE_MEDIA_DIR` | `~/.lemonclaude/media` | Where images and audio an Omni bundle makes are saved |
 | `ANTHROPIC_CUSTOM_MODEL_OPTION` | none | If you've set this yourself for something other than Lemonade, LemonClaude leaves your entry alone |
 
 ### Privacy
@@ -171,13 +163,6 @@ LemonClaude shares Lemonade Server with whatever else uses it, such as the Lemon
 - **It leaves other mods' agents alone.** A subagent of another plugin's agent type, one named like `other:worker`, is that plugin's to answer. LemonClaude passes its requests through untouched.
 
 To run two chat models at once, raise `max_loaded_models` in Lemonade's settings. That's your call, so LemonClaude never changes it.
-
-Another program, such as a second Lemonade server, can also hold GPU memory that this server can't see. On Windows a load into a full GPU doesn't fail. llama.cpp puts some layers in system RAM, or Windows pages GPU memory there, and the model answers slowly. So after each load, LemonClaude reads Windows' GPU counters for the process that runs the model and for its GPU:
-
-- If much of the model is in system memory already, it says so: "About 1.5 GB of it is in system memory because the GPU is full, so it will be slow."
-- If the model fits only because Windows paged an idle program out to make room, it says the GPU is overcommitted. That's when everything committed to the GPU is more than it has. When the programs on it are busy at once, Windows swaps them through system memory and they slow down.
-
-Integrated GPUs, which borrow system memory by design, are left out. On other systems a load into a full GPU can fail outright, and LemonClaude then says "Not enough GPU memory: another app may be using it." Either way it suggests freeing GPU memory, lowering `LEMONCLAUDE_CTX_SIZE`, or picking a smaller model.
 
 ## How it works
 
@@ -203,10 +188,7 @@ Integrated GPUs, which borrow system memory by design, are left out. On other sy
 - **API keys:** a Lemonade server that requires `LEMONADE_API_KEY` isn't supported yet.
 - **Context window:** Claude Code budgets context as if it were talking to Claude. The real limit is the window LemonClaude loads the model with, 64K by default (`LEMONCLAUDE_CTX_SIZE`). If another app already loaded the model with a different window, LemonClaude uses it as loaded rather than reload it.
 - **Background calls:** Claude Code may print an `unrecognized_model` notice. Its background calls (session titles and similar) ask for Claude models, and Lemonade answers them with a 404 while requests go to Lemonade.
-- **Omni bundles:**
-  - The proxy asks Lemonade for the whole reply, then streams it to Claude Code, so a bundle's text appears all at once rather than word by word.
-  - Thinking blocks don't carry over, and token counts are estimates.
-  - A bundle needs Node.js. Without it, LemonClaude says so and stays on the current model.
+- **Omni models:** an Omni model's reply appears all at once rather than word by word. Thinking blocks don't carry over, and token counts are estimates.
 - **Model quality:** small local models follow Claude Code's tool protocol less reliably than Claude does. Models without the `tool-calling` label may fail to use tools at all.
 
 ## Troubleshooting
@@ -219,7 +201,6 @@ Integrated GPUs, which borrow system memory by design, are left out. On other sy
 | "Lemonade Server didn't answer … within 60 s of starting" | Start Lemonade Server from the Start menu and check it runs. Its tray icon opens the logs |
 | The first reply is slow | Loading a model takes a few seconds, and its first answer can take 20 seconds or more. `/lemonade on` loads before you ask anything |
 | "Another app has pinned Lemonade's chat models (…)" | Another app holds Lemonade's chat slot. Unload its model there, raise `max_loaded_models` in Lemonade's settings, or pick a Claude model |
-| "Not enough GPU memory", or "… is in system memory because the GPU is full" | Another program holds GPU memory. Free some, lower `LEMONCLAUDE_CTX_SIZE`, or pick a smaller model |
 | "… isn't downloaded" | Download the model from `/lemonade` first. LemonClaude never downloads a model just by loading it |
 | Tools fail or the model ignores them | Pick a model labeled `tool-calling` (the model manager shows `tools`) |
 | Requests still go to Lemonade after removing the mod | Start a new session, or unset `ANTHROPIC_BASE_URL` in that shell |
@@ -245,7 +226,7 @@ Don't develop LemonClaude in a session that has it loaded. A bug in its `turn.st
 
 ## Future work
 
-- **Omni bundles streamed word by word**, through Lemonade's streaming chat completions.
+- **Omni models streamed word by word.** Better still, Lemonade's Anthropic endpoint accepting Omni models, so the proxy can go.
 - **An embedded Lemonade per project**, as an opt-in. Two Lemonade servers on one GPU would each assume the whole card is free, so this only makes sense with each server given its own GPU.
 
 ## License

@@ -14,7 +14,7 @@ const MODELS = [
   { id: 'FLM-Chat', size: 1, downloaded: false, suggested: true, recipe: 'flm', labels: ['chat'] },
 ]
 /** A model in Lemonade's memory, as /api/v1/health lists it. */
-type Loaded = { model_name: string; type: string; pinned: boolean; recipe_options: { ctx_size: number }; pid?: number }
+type Loaded = { model_name: string; type: string; pinned: boolean; recipe_options: { ctx_size: number } }
 // What this machine can run, as /api/v1/system-info judges it: no NPU for FastFlowLM.
 const SYSTEM = {
   'Physical Memory': '64.00 GB',
@@ -42,11 +42,6 @@ type Lemonade = {
   loadError?: string
   /** /api/v1/system-info, when a test gives other hardware. */
   system?: typeof SYSTEM
-  /** Each bundle registered (a pull with recipe collection.omni), and each model deleted. */
-  bundles: Array<{ model_name: string; components: string[] }>
-  deleted: string[]
-  /** What Windows' GPU counters say about each model's server process, as PowerShell prints it. */
-  gpu?: string
   /** Each request that went out through curl, as `METHOD /path`. */
   curled: string[]
   /** What Lemonade has in memory: one chat slot, as max_loaded_models 1 gives. */
@@ -118,8 +113,6 @@ function world(
     loaded: [{ model_name: 'Qwen3.5-4B-GGUF', type: 'llm', pinned: false, recipe_options: { ctx_size: 262144 } }],
     loads: [],
     pins: [],
-    bundles: [],
-    deleted: [],
   }
   const agents: World['agents'] = []
   const spawns: string[][] = []
@@ -160,7 +153,6 @@ function world(
         type: 'llm',
         pinned: load.pinned === true,
         recipe_options: { ctx_size: load.ctx_size ?? 262144 },
-        pid: 4242,
       }
       const here = lemonade.loaded.findIndex(m => m.model_name === load.model_name)
       if (here >= 0) lemonade.loaded[here] = loaded
@@ -189,17 +181,7 @@ function world(
     }
     else if (path === '/api/v1/downloads') body = lemonade.jobs
     else if (path === '/api/v1/system-info') body = lemonade.system ?? SYSTEM
-    else if (path === '/api/v1/pull' && method === 'POST' && (JSON.parse(sent ?? '{}') as { recipe?: string }).recipe === 'collection.omni') {
-      const bundle = JSON.parse(sent ?? '{}') as { model_name: string; components: string[] }
-      lemonade.bundles.push(bundle)
-      lemonade.models.push({ id: bundle.model_name, size: 3, downloaded: true, suggested: false, recipe: 'collection.omni', labels: [] })
-      body = { model_name: bundle.model_name, status: 'success' }
-    } else if (path === '/api/v1/delete' && method === 'POST') {
-      const { model_name } = JSON.parse(sent ?? '{}') as { model_name: string }
-      lemonade.deleted.push(model_name)
-      lemonade.models = lemonade.models.filter(m => m.id !== model_name)
-      body = { status: 'success' }
-    } else if (path === '/api/v1/pull' && method === 'POST') {
+    else if (path === '/api/v1/pull' && method === 'POST') {
       const pull = JSON.parse(sent ?? '{}') as { model_name: string }
       lemonade.pulls.push(pull)
       lemonade.jobs.push({ model_name: pull.model_name, status: 'downloading', running: true, percent: 0 })
@@ -209,11 +191,6 @@ function world(
   }
 
   on('process.run', async ($, e) => {
-    // Windows' GPU memory counters: the readings the test set, or none.
-    if (e.argv[0] === 'powershell.exe' && (e.init?.stdin ?? '').includes('GPU Process Memory')) {
-      const reading = lemonade.gpu
-      return { value: { exitCode: reading ? 0 : 1, stdout: reading ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-    }
     // curl: the way to Lemonade while Claude Code refuses a plugin's own requests.
     if (e.argv[0] === 'curl') {
       const url = e.argv.at(-1)!
@@ -510,28 +487,6 @@ describe('model manager', () => {
     expect(drawn[0]).toContain('Downloaded chat models')
   })
 })
-
-/**
- * What Windows' GPU counters say about the model server process 4242, as PowerShell prints it, in
- * MB: what it holds on the RTX of its own and borrowed, and what it holds on the integrated Radeon,
- * then each GPU's own memory size from the registry (8 GB and 512 MB).
- */
-function gpu(rtxDedicated: number, rtxShared: number, radeonDedicated = 0, radeonShared = 0, rtxCommitted = rtxDedicated + rtxShared): string {
-  const mb = 1024 * 1024
-  const b = String.fromCharCode(92)
-  const line = (luid: string, kind: string, value: number) =>
-    `process|${b}${b}host${b}gpu process memory(pid_4242_luid_0x00000000_0x${luid}_phys_0)${b}${kind} usage|${value * mb}`
-  return [
-    line('0001d6f4', 'dedicated', rtxDedicated),
-    line('0001d6f4', 'shared', rtxShared),
-    line('00014de1', 'dedicated', radeonDedicated),
-    line('00014de1', 'shared', radeonShared),
-    `committed|${b}${b}host${b}gpu adapter memory(luid_0x00000000_0x0001d6f4_phys_0)${b}total committed|${rtxCommitted * mb}`,
-    `committed|${b}${b}host${b}gpu adapter memory(luid_0x00000000_0x00014de1_phys_0)${b}total committed|${(radeonDedicated + radeonShared) * mb}`,
-    `adapter|luid_0x00000000_0x0001d6f4|${8192 * mb}`,
-    `adapter|luid_0x00000000_0x00014de1|${512 * mb}`,
-  ].join(String.fromCharCode(13, 10))
-}
 
 const WINDOWS = { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' }
 const EXE = 'C:\\Users\\me\\AppData\\Local\\lemonade_server\\bin\\LemonadeServer.exe'
@@ -852,12 +807,11 @@ describe('model list nesting', () => {
   })
 })
 
-describe('Omni bundles', () => {
+describe('Omni models', () => {
   const bundle = { id: 'LMX-Omni-Mini', size: 3, downloaded: true, suggested: true, recipe: 'collection.omni', labels: ['chat'] }
-  const image = { id: 'SD-Turbo-GGUF', size: 5, downloaded: true, suggested: true, recipe: 'sd-cpp', labels: ['image'] }
 
-  test("a bundle's requests go through the Omni proxy, started once for the session", async ($, on) => {
-    const { asked, env, spawns, toasts, lemonade: server } = world(on, { LEMONCLAUDE_MEDIA_DIR: 'C:/media' })
+  test("an Omni model is picked like any other; its requests go through the proxy, started once", async ($, on) => {
+    const { asked, env, spawns, toasts, lemonade: server } = world(on, { USERPROFILE: 'C:/Users/me' })
     server.models.push(bundle)
     await start($)
     const { text } = await lemonade($, 'on LMX-Omni-Mini')
@@ -865,7 +819,7 @@ describe('Omni bundles', () => {
     expect(env.get('ANTHROPIC_BASE_URL')).toBe('http://127.0.0.1:4567')
     await step($)
     expect(asked).toEqual(['LMX-Omni-Mini @ http://127.0.0.1:4567'])
-    expect(spawns[0]).toEqual(['node', expect.stringMatching(/proxy[\\/]omni-proxy\.mjs$/), '--lemonade', 'http://127.0.0.1:13305', '--media', 'C:/media'])
+    expect(spawns[0]).toEqual(['node', expect.stringMatching(/proxy[\\/]omni-proxy\.mjs$/), '--lemonade', 'http://127.0.0.1:13305', '--media', 'C:/Users/me/.lemonclaude/media'])
     // Back to a single model: straight to Lemonade again.
     await lemonade($, 'on gemma')
     await step($)
@@ -873,57 +827,17 @@ describe('Omni bundles', () => {
     expect(toasts.some(t => t.includes('Node'))).toBe(false)
   })
 
-  test('without Node, a bundle says what it needs and stays off', async ($, on) => {
+  test('without Node, an Omni model says what it needs and stays off', async ($, on) => {
     const { asked, lemonade: server } = world(on, {}, { noNode: true })
     server.models.push(bundle)
     await start($)
-    expect((await lemonade($, 'on LMX-Omni-Mini')).text).toContain('Omni bundles run through a small proxy on Node.js')
+    expect((await lemonade($, 'on LMX-Omni-Mini')).text).toContain('LemonClaude reaches Omni models through a small Node.js proxy')
     await step($)
     expect(asked).toEqual(['claude-opus-5-5 @ default'])
   })
 
-  test('/lemonade bundle makes one of downloaded models, a chat model among them', async ($, on) => {
-    const { lemonade: server } = world(on)
-    server.models.push(image)
-    await start($)
-    const { text } = await lemonade($, 'bundle MyKit Gemma-Chat-GGUF SD-Turbo')
-    expect(server.bundles).toEqual([{ model_name: 'user.MyKit', recipe: 'collection.omni', components: ['Gemma-Chat-GGUF', 'SD-Turbo-GGUF'] }])
-    expect(text).toContain('Made the Omni bundle user.MyKit: Gemma-Chat-GGUF (chat), SD-Turbo-GGUF (image).')
-    // Loaded as a bundle: no window to claim, and tool support read from its chat model.
-    server.bundles[0]!.components = ['Qwen3.5-4B-GGUF', 'SD-Turbo-GGUF']
-    server.models.find(m => m.id === 'user.MyKit')!.labels = []
-    ;(server.models.find(m => m.id === 'user.MyKit') as Record<string, unknown>).components = ['Qwen3.5-4B-GGUF', 'SD-Turbo-GGUF']
-    server.loaded = []
-    const used = await lemonade($, 'on user.MyKit')
-    expect(used.text).toContain('Loaded the Omni bundle user.MyKit.')
-    expect(used.text).not.toContain('window')
-    expect(used.text).not.toContain('tool-calling')
-    // It's in the list, tagged.
-    const ui = await manager($, 'desktop')
-    expect((await ui.find({ key: 'row-user.MyKit' }))?.text).toContain('bundle')
-  })
 
-  test('/lemonade bundle refuses models not downloaded, and a bundle with no chat model', async ($, on) => {
-    const { lemonade: server } = world(on)
-    server.models.push(image)
-    await start($)
-    expect((await lemonade($, 'bundle Kit Not-Pulled-GGUF SD-Turbo-GGUF')).text).toContain("Not-Pulled-GGUF isn't downloaded")
-    expect((await lemonade($, 'bundle Kit SD-Turbo-GGUF Whisper')).text).toContain('A bundle needs a chat model')
-    expect((await lemonade($, 'bundle Kit')).text).toContain('Name the bundle and two or more downloaded models')
-    expect(server.bundles).toEqual([])
-  })
 
-  test('/lemonade unbundle removes a bundle, not while requests go to it', async ($, on) => {
-    const { lemonade: server } = world(on)
-    server.models.push(image)
-    await start($)
-    await lemonade($, 'bundle MyKit Gemma-Chat-GGUF SD-Turbo-GGUF')
-    await lemonade($, 'on user.MyKit')
-    expect((await lemonade($, 'unbundle MyKit')).text).toContain('Run /lemonade off first')
-    await lemonade($, 'off')
-    expect((await lemonade($, 'unbundle MyKit')).text).toBe('Removed the bundle user.MyKit. Its models stay downloaded.')
-    expect(server.deleted).toEqual(['user.MyKit'])
-  })
 })
 
 describe('nonessential traffic', () => {
@@ -983,7 +897,7 @@ describe('sharing Lemonade', () => {
     session.model = 'Gemma-Chat-GGUF'
     await step($, session.model)
     expect(server.loads).toEqual([{ model_name: 'Gemma-Chat-GGUF', ctx_size: 65536, pinned: true }])
-    expect(server.loaded).toEqual([{ model_name: 'Gemma-Chat-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 65536 }, pid: 4242 }])
+    expect(server.loaded).toEqual([{ model_name: 'Gemma-Chat-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 65536 } }])
     expect(asked).toEqual(['Gemma-Chat-GGUF @ http://127.0.0.1:13305'])
     // Qwen was unpinned and nobody's LemonClaude knew: it made room, and the toast says so.
     expect(toasts.some(t => t.includes('Loaded Gemma-Chat-GGUF with a 64K window. Lemonade unloaded Qwen3.5-4B-GGUF to make room.'))).toBe(true)
@@ -1073,7 +987,7 @@ describe('sharing Lemonade', () => {
     await lemonade($, 'on gemma')
     await step($)
     expect(asked).toEqual(['Qwen3.5-4B-GGUF @ http://127.0.0.1:13305', 'Gemma-Chat-GGUF @ http://127.0.0.1:13305'])
-    expect(server.loaded).toEqual([{ model_name: 'Gemma-Chat-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 65536 }, pid: 4242 }])
+    expect(server.loaded).toEqual([{ model_name: 'Gemma-Chat-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 65536 } }])
     expect(session.model).toBe('claude-opus-5-5')
   })
 
@@ -1095,104 +1009,12 @@ describe('sharing Lemonade', () => {
     expect(server.pins).toEqual([])
   })
 
-  test('a model that fit says nothing more', async ($, on) => {
-    const { toasts, session, lemonade: server } = world(on, WINDOWS)
-    server.loaded = []
-    server.gpu = gpu(2400, 150)
-    await start($)
-    session.model = 'Gemma-Chat-GGUF'
-    await step($, session.model)
-    expect(toasts.some(t => t.includes('Loaded Gemma-Chat-GGUF with a 64K window.'))).toBe(true)
-    expect(toasts.some(t => t.includes('system memory'))).toBe(false)
-  })
 
-  test('a model Windows paged partly into system memory says it will be slow', async ($, on) => {
-    const { toasts, session, lemonade: server } = world(on, WINDOWS)
-    server.loaded = []
-    // As seen live with another server busy on the RTX: half the model's memory was borrowed.
-    server.gpu = gpu(3008, 3150)
-    await start($)
-    session.model = 'Gemma-Chat-GGUF'
-    await step($, session.model)
-    expect(
-      toasts.some(t =>
-        t.includes('About 3.1 GB of it is in system memory because the GPU is full, so it will be slow. Free GPU memory, lower LEMONCLAUDE_CTX_SIZE, or pick a smaller model.'),
-      ),
-    ).toBe(true)
-  })
 
-  test('a model llama.cpp fit partly into system RAM says so too', async ($, on) => {
-    const { toasts, session, lemonade: server } = world(on, WINDOWS)
-    server.loaded = []
-    // Gemma is 2.1 GB, but its process holds only 600 MB on the GPU.
-    server.gpu = gpu(600, 150)
-    await start($)
-    session.model = 'Gemma-Chat-GGUF'
-    await step($, session.model)
-    expect(toasts.some(t => t.includes('About 1.5 GB of it is in system memory because the GPU is full'))).toBe(true)
-  })
 
-  test('a model that fits only because Windows paged an idle program out says the GPU is overcommitted', async ($, on) => {
-    const { toasts, session, lemonade: server } = world(on, WINDOWS)
-    server.loaded = []
-    // As seen live: the new model got 6 GB of the RTX's own memory, but an idle server's 13.4 GB is
-    // still committed to the card, which has 8.
-    server.gpu = gpu(6002, 154, 0, 0, 6157 + 13400)
-    await start($)
-    session.model = 'Gemma-Chat-GGUF'
-    await step($, session.model)
-    expect(
-      toasts.some(t =>
-        t.includes(
-          'The GPU is overcommitted by about 11.1 GB: when the programs on it are busy at once, Windows swaps them through system memory, and this model will be slow.',
-        ),
-      ),
-    ).toBe(true)
-  })
 
-  test('staging buffers a little over the card are not overcommitment', async ($, on) => {
-    const { toasts, session, lemonade: server } = world(on, WINDOWS)
-    server.loaded = []
-    server.gpu = gpu(8000, 150, 0, 0, 8192 + 200)
-    await start($)
-    session.model = 'Gemma-Chat-GGUF'
-    await step($, session.model)
-    expect(toasts.some(t => t.includes('overcommitted') || t.includes('system memory'))).toBe(false)
-  })
 
-  test('an integrated GPU, which borrows memory by design, says nothing', async ($, on) => {
-    const { toasts, session, lemonade: server } = world(on, WINDOWS)
-    server.loaded = []
-    server.gpu = gpu(0, 0, 300, 3000)
-    await start($)
-    session.model = 'Gemma-Chat-GGUF'
-    await step($, session.model)
-    expect(toasts.some(t => t.includes('system memory'))).toBe(false)
-  })
 
-  test('counters it cannot read say nothing', async ($, on) => {
-    const { toasts, session, lemonade: server } = world(on, WINDOWS)
-    server.loaded = []
-    await start($)
-    session.model = 'Gemma-Chat-GGUF'
-    await step($, session.model)
-    expect(toasts.some(t => t.includes('system memory'))).toBe(false)
-    expect(toasts.some(t => t.includes('Loaded Gemma-Chat-GGUF with a 64K window.'))).toBe(true)
-  })
-
-  test('a load that runs out of GPU memory says so, and how to make room', async ($, on) => {
-    const { asked, lemonade: server } = world(on)
-    server.loaded = []
-    server.loadError = 'llama-server failed to start: CUDA error: out of memory'
-    await start($)
-    const { text } = await lemonade($, 'on gemma')
-    expect(text).toBe(
-      "Lemonade couldn't load Gemma-Chat-GGUF: llama-server failed to start: CUDA error: out of memory " +
-        'Not enough GPU memory: another app may be using it. Free some, lower LEMONCLAUDE_CTX_SIZE (now 65536), or pick a smaller model.',
-    )
-    await step($)
-    expect(asked).toEqual(['claude-opus-5-5 @ default'])
-  })
 
   test('any other load failure is passed on as Lemonade says it', async ($, on) => {
     const { lemonade: server } = world(on)

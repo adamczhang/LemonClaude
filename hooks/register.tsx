@@ -394,7 +394,7 @@ function sizeRange(models: readonly LemonadeModel[]): string {
 
 function tags(m: LemonadeModel): string {
   const pin = m.pin === 'theirs' ? 'pinned by another app' : m.pin === 'mine' ? 'pinned' : ''
-  return [m.recipe === 'collection.omni' ? 'bundle' : '', m.isTooBig ? 'too big' : '', m.hasTools ? 'tools' : '', ...['vision', 'reasoning', 'coding'].filter(l => m.labels.includes(l)), pin]
+  return [m.isTooBig ? 'too big' : '', m.hasTools ? 'tools' : '', ...['vision', 'reasoning', 'coding'].filter(l => m.labels.includes(l)), pin]
     .filter(Boolean)
     .join(' · ')
 }
@@ -426,7 +426,7 @@ async function download($: $, id: string): Promise<void> {
 }
 
 /** A model Lemonade has in memory, as /api/v1/health lists it. */
-type Loaded = { model_name: string; pinned?: boolean; type?: string; pid?: number }
+type Loaded = { model_name: string; pinned?: boolean; type?: string }
 
 /** What Lemonade has loaded now, or null when it doesn't answer. */
 async function loadedNow($: $, base: string): Promise<Loaded[] | null> {
@@ -485,68 +485,6 @@ async function release($: $, model: string): Promise<void> {
   if (!(model in (await ours($)))) return
   await setPin($, await baseUrl($), model, false)
   await remember($, model, false)
-}
-
-const GB = 1024 ** 3
-const MB = 1024 ** 2
-
-/**
- * Whether the model a Lemonade backend process (`pid`) runs fits its GPU, on Windows, where a load into
- * a full GPU never fails: llama.cpp puts layers in system RAM, or Windows pages GPU memory there, and
- * models answer slowly.
- *
- * - `now`: this process has so much in system memory already, in bytes. Per-process counters say what
- *   it holds on each GPU, its own memory and memory it borrows: it spilled when it borrows over 512 MB
- *   (a backend's staging buffers take 100-350 MB), or holds under 60% of the model's size on a GPU.
- * - `soon`: it fits for now, but everything committed to its GPU (Total Committed, which counts a
- *   paged-out idle program at full size) is so much more than the GPU has, in bytes. Windows paged an
- *   idle program out to let this one in; when both are busy, they swap through system memory.
- *
- * A GPU with under 2 GB of its own, an integrated one that borrows by design, says nothing; so does
- * anything unreadable (not Windows, counters under another language's names).
- */
-async function spilled(
-  $: $,
-  pid: number,
-  sizeGb: number | undefined,
-): Promise<{ kind: 'now' | 'soon'; bytes: number } | null> {
-  if (!(await $.env.get('LOCALAPPDATA'))) return null
-  const script = String.raw`$owner = ${pid}
-(Get-Counter '\GPU Process Memory(*)\Dedicated Usage','\GPU Process Memory(*)\Shared Usage' -ErrorAction SilentlyContinue).CounterSamples | Where-Object { $_.Path -match "pid_$($owner)_" } | ForEach-Object { 'process|' + $_.Path + '|' + [int64]$_.CookedValue }
-(Get-Counter '\GPU Adapter Memory(*)\Total Committed' -ErrorAction SilentlyContinue).CounterSamples | ForEach-Object { 'committed|' + $_.Path + '|' + [int64]$_.CookedValue }
-Get-ChildItem HKLM:\SOFTWARE\Microsoft\DirectX -ErrorAction SilentlyContinue | ForEach-Object { $a = Get-ItemProperty $_.PSPath; if ($a.AdapterLuid) { 'adapter|luid_0x{0:x8}_0x{1:x8}|{2}' -f ($a.AdapterLuid -shr 32), ($a.AdapterLuid -band 0xffffffff), [int64]$a.DedicatedVideoMemory } }`
-  const ran = await $.process
-    .run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', '-'], { stdin: `${script}\n`, timeoutMs: 15_000 })
-    .catch(() => undefined)
-  if (!ran || ran.exitCode !== 0) return null
-  const held = new Map<string, { dedicated: number; shared: number }>()
-  const own = new Map<string, number>()
-  const committed = new Map<string, number>()
-  for (const line of ran.stdout.split(/\r?\n/)) {
-    const usage = /pid_\d+_(luid_0x[0-9a-f]+_0x[0-9a-f]+)_phys_\d+\)\\(dedicated|shared) usage\|(\d+)/i.exec(line)
-    if (usage) {
-      const on = held.get(usage[1]!) ?? { dedicated: 0, shared: 0 }
-      on[usage[2]!.toLowerCase() as 'dedicated' | 'shared'] += Number(usage[3])
-      held.set(usage[1]!, on)
-    }
-    const adapter = /^adapter\|(luid_0x[0-9a-f]+_0x[0-9a-f]+)\|(\d+)/i.exec(line)
-    if (adapter) own.set(adapter[1]!, Number(adapter[2]))
-    const total = /^committed\|.*\((luid_0x[0-9a-f]+_0x[0-9a-f]+)_phys_\d+\)\\total committed\|(\d+)/i.exec(line)
-    if (total) committed.set(total[1]!, (committed.get(total[1]!) ?? 0) + Number(total[2]))
-  }
-  // The GPU this process uses most.
-  let gpu: { adapter: string; dedicated: number; shared: number } | undefined
-  for (const [adapter, on] of held) {
-    if (!gpu || on.dedicated + on.shared > gpu.dedicated + gpu.shared) gpu = { adapter, ...on }
-  }
-  const card = gpu ? (own.get(gpu.adapter) ?? 0) : 0
-  if (!gpu || gpu.dedicated + gpu.shared < 256 * MB || card < 2 * GB) return null
-  if (gpu.shared > 512 * MB) return { kind: 'now', bytes: gpu.shared }
-  const size = (sizeGb ?? 0) * GB
-  if (size > 0 && gpu.dedicated < 0.6 * size) return { kind: 'now', bytes: size - gpu.dedicated }
-  // Every backend commits about 100 MB of staging buffers outside the card: allow some slack.
-  const over = (committed.get(gpu.adapter) ?? 0) - card
-  return over > 256 * MB ? { kind: 'soon', bytes: over } : null
 }
 
 /** How loading a model for requests went: ready or not, and what to tell the person. */
@@ -630,14 +568,7 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
     }
   }
   if (!answer.ok) {
-    const why = errorOf(answer.text) ?? `it answered ${answer.status}`
-    // Another Lemonade server, or any other program, can hold the GPU memory this load needed: Lemonade
-    // can't see it, so the load fails rather than getting a clean conflict.
-    const isMemory = /out of memory|\boom\b|failed to allocate|cudaMalloc|insufficient memory|not enough memory|ErrorOutOfDeviceMemory/i.test(why)
-    const hint = isMemory
-      ? ` Not enough GPU memory: another app may be using it. Free some, lower LEMONCLAUDE_CTX_SIZE (now ${ctx}), or pick a smaller model.`
-      : ''
-    return { ok: false, message: `Lemonade couldn't load ${model}: ${why}${hint}` }
+    return { ok: false, message: `Lemonade couldn't load ${model}: ${errorOf(answer.text) ?? `it answered ${answer.status}`}` }
   }
 
   await remember($, model, true)
@@ -649,21 +580,9 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
     .map(m => m.model_name)
   await refresh($)
   const room = gone.length > 0 ? ` Lemonade unloaded ${gone.join(', ')} to make room.` : ''
-  // Lemonade loads a bundle's models with their own settings, not the window asked for.
-  if (known.recipe === 'collection.omni') return { ok: true, message: `Loaded the Omni bundle ${model}.${room}` }
-  // Whether it fit: the process that runs it, on this machine, measured on Windows.
-  const pid = after.find(m => m.model_name === model)?.pid
-  const fit = pid && (await isLocal($)) ? await spilled($, pid, known.size) : null
-  const gb = fit ? (fit.bytes / GB).toFixed(1) : ''
-  const remedy = 'Free GPU memory, lower LEMONCLAUDE_CTX_SIZE, or pick a smaller model.'
-  const slow =
-    fit?.kind === 'now'
-      ? ` About ${gb} GB of it is in system memory because the GPU is full, so it will be slow. ${remedy}`
-      : fit?.kind === 'soon'
-        ? ` The GPU is overcommitted by about ${gb} GB: when the programs on it are busy at once, Windows swaps them ` +
-          `through system memory, and this model will be slow. ${remedy}`
-        : ''
-  return { ok: true, message: `Loaded ${model} with ${windowName(ctx)} window.${room}${slow}` }
+  // A collection's models load with their own settings, not the window asked for.
+  if (known.recipe.startsWith('collection.')) return { ok: true, message: `Loaded ${model}.${room}` }
+  return { ok: true, message: `Loaded ${model} with ${windowName(ctx)} window.${room}` }
 }
 
 // The last toast and when: requests that arrive together (a step and its subagents') say a thing once.
@@ -680,9 +599,9 @@ function say($: $, text: string): void {
  * True for a subagent of another plugin's agent type (`other:worker`): that plugin answers its steps
  * itself, perhaps from a local model of its own, so LemonClaude leaves them untouched.
  */
-const NO_NODE = 'Omni bundles run through a small proxy on Node.js, and Node could not start. Install Node.js, or pick a single model.'
+const NO_NODE = 'LemonClaude reaches Omni models through a small Node.js proxy, and Node could not start. Install Node.js, or pick another model.'
 
-/** Why `model` can't be served now, if it's a bundle and its proxy can't run; else nothing. */
+/** Why `model` can't be served now, if it's an Omni model and its proxy can't run; else nothing. */
 async function bundleProblem($: $, model: string): Promise<string | undefined> {
   return (await isBundle($, model)) && (await omniProxy($)) === null ? NO_NODE : undefined
 }
@@ -816,7 +735,7 @@ async function applyEnv($: $, env: SavedEnv): Promise<void> {
   await $.env.set('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ?? undefined)
 }
 
-/** True for an Omni bundle: a collection of models Lemonade runs as one (`collection.omni`). */
+/** True for an Omni model: a collection of models Lemonade runs as one (`collection.omni`), such as LMX-Omni. */
 async function isBundle($: $, model: string): Promise<boolean> {
   return (await read($, catalog)).some(m => m.id === model && m.recipe === 'collection.omni')
 }
@@ -826,10 +745,10 @@ async function isBundle($: $, model: string): Promise<boolean> {
 let proxy: Promise<string | null> | null = null
 
 /**
- * The URL of LemonClaude's Omni proxy, started when a bundle first needs it. Lemonade runs a bundle
- * only on its OpenAI-style chat completions, and Claude Code speaks Anthropic's Messages API; the
- * proxy (proxy/omni-proxy.mjs, on Node) translates, and saves the images and audio a bundle makes.
- * Null when it can't start, as without Node.
+ * The URL of LemonClaude's Omni proxy, started when an Omni model first needs it. Lemonade runs Omni
+ * models only on its OpenAI-style chat completions, while Claude Code speaks Anthropic's Messages API;
+ * the proxy (proxy/omni-proxy.mjs, on Node) translates, and saves the images and audio they make as
+ * files under ~/.lemonclaude/media. Null when it can't start, as without Node.
  */
 function omniProxy($: $): Promise<string | null> {
   proxy ??= startProxy($)
@@ -838,7 +757,7 @@ function omniProxy($: $): Promise<string | null> {
 
 async function startProxy($: $): Promise<string | null> {
   const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '.'
-  const media = (await $.env.get('LEMONCLAUDE_MEDIA_DIR')) ?? `${home}/.lemonclaude/media`
+  const media = `${home}/.lemonclaude/media`
   const child = $.process.spawn({
     argv: ['node', `${$.plugin.root}/proxy/omni-proxy.mjs`, '--lemonade', await baseUrl($), '--media', media],
   })
@@ -868,7 +787,7 @@ async function startProxy($: $): Promise<string | null> {
 /** Sends requests to Lemonade's `model`, or back to Claude for null; a no-op when already so. */
 export async function route($: $, model: string | null): Promise<void> {
   const was = await read($, routed)
-  // A bundle's requests go through the Omni proxy; a single model's straight to Lemonade.
+  // An Omni model's requests go through the proxy; any other model's straight to Lemonade.
   const bundle = model !== null && (await isBundle($, model))
   const target = model ? ((bundle ? await omniProxy($) : null) ?? (await baseUrl($))) : null
   if (was === model) {
@@ -889,7 +808,7 @@ export async function route($: $, model: string | null): Promise<void> {
     await update($, saved, () => null as SavedEnv | null)
   }
   await update($, routed, () => model)
-  $.ui.status(model ? `🍋 ${model} (Lemonade${bundle ? ' Omni' : ''})` : undefined)
+  $.ui.status(model ? `🍋 ${model} (Lemonade)` : undefined)
   // Requests left that model: give back its pin, if LemonClaude held it, so other apps can use the slot.
   if (was) await release($, was)
 }
@@ -960,58 +879,6 @@ async function switchOn($: $, query: string): Promise<string> {
   return `${loaded.message ? `${loaded.message} ` : ''}${how}${m ? caveats(m) : ''}`
 }
 
-/** Every model Lemonade lists, any kind, by id: what a bundle may be made of. */
-async function everyModel($: $): Promise<Array<{ id: string; recipe?: string; labels?: string[]; downloaded?: boolean }>> {
-  const listed = await askLemonade($, `${await baseUrl($)}/api/v1/models?show_all=true`)
-  return listed.ok ? ((parsed(listed.text)?.data ?? []) as Array<{ id: string; recipe?: string; labels?: string[]; downloaded?: boolean }>) : []
-}
-
-/**
- * `/lemonade bundle <name> <model> <model>...`: registers an Omni bundle of downloaded models, a chat
- * model among them, as `user.<name>`. Only downloaded models: registering one that isn't would
- * download it.
- */
-async function makeBundle($: $, words: readonly string[]): Promise<string> {
-  const [name, ...wanted] = words
-  if (!name || wanted.length < 2) {
-    return 'Name the bundle and two or more downloaded models, a chat model among them: /lemonade bundle MyKit Qwen3.5-4B-GGUF SD-Turbo-GGUF'
-  }
-  const id = name.startsWith('user.') ? name : `user.${name}`
-  const all = await everyModel($)
-  if (all.length === 0) return "Lemonade isn't answering, so no bundle was made."
-  const parts: typeof all = []
-  for (const want of wanted) {
-    const exact = all.find(m => m.id.toLowerCase() === want.toLowerCase())
-    const like = all.filter(m => m.id.toLowerCase().includes(want.toLowerCase()) && m.downloaded)
-    const found = exact ?? (like.length === 1 ? like[0] : undefined)
-    if (!found) return like.length > 1 ? `"${want}" matches ${like.map(m => m.id).join(', ')}; name one.` : `Lemonade lists no model "${want}".`
-    if (found.downloaded === false) return `${found.id} isn't downloaded. Download it first: a bundle made of it would download it.`
-    parts.push(found)
-  }
-  if (!parts.some(m => (m.labels ?? []).includes('chat'))) return 'A bundle needs a chat model to answer: name one among its models.'
-  const made = await askLemonade($, `${await baseUrl($)}/api/v1/pull`, {
-    method: 'POST',
-    body: JSON.stringify({ model_name: id, recipe: 'collection.omni', components: parts.map(m => m.id) }),
-  }).catch((err: unknown): Answer => ({ ok: false, status: 0, text: JSON.stringify({ error: String(err) }) }))
-  if (!made.ok) return `Lemonade couldn't make ${id}: ${errorOf(made.text) ?? `it answered ${made.status}`}`
-  await refresh($)
-  const kinds = parts.map(m => `${m.id} (${(m.labels ?? []).filter(l => !['hot', 'mtp'].includes(l))[0] ?? m.recipe ?? 'model'})`)
-  return `Made the Omni bundle ${id}: ${kinds.join(', ')}. Use it with /lemonade on ${id}, or Use in /lemonade.`
-}
-
-/** `/lemonade unbundle <name>`: removes a bundle you made; its models stay downloaded. */
-async function removeBundle($: $, name: string): Promise<string> {
-  const id = name.startsWith('user.') ? name : `user.${name}`
-  if (!(await everyModel($)).some(m => m.id === id && m.recipe === 'collection.omni')) return `There's no bundle ${id} to remove.`
-  if ((await read($, routed)) === id) return `Requests go to ${id} now. Run /lemonade off first.`
-  const gone = await askLemonade($, `${await baseUrl($)}/api/v1/delete`, { method: 'POST', body: JSON.stringify({ model_name: id }) }).catch(
-    (err: unknown): Answer => ({ ok: false, status: 0, text: JSON.stringify({ error: String(err) }) }),
-  )
-  if (!gone.ok) return `Lemonade couldn't remove ${id}: ${errorOf(gone.text) ?? `it answered ${gone.status}`}`
-  await refresh($)
-  return `Removed the bundle ${id}. Its models stay downloaded.`
-}
-
 /** `/lemonade off`: requests follow the session's model again. */
 async function switchOff($: $): Promise<string> {
   await update($, heldOver, () => null as string | null)
@@ -1045,7 +912,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'lemonade',
-      description: 'Use a local Lemonade model: /lemonade opens the model list; /lemonade on, off, <model>, list, bundle, unbundle',
+      description: 'Use a local Lemonade model: /lemonade opens the model list; /lemonade on, off, <model>, list',
     })
 
     // Pins a session left when it ended without a goodbye (a crash) would hold Lemonade's slots for good.
@@ -1086,11 +953,6 @@ export const register: Register = on => {
     const [word = '', ...rest] = arg.split(/\s+/)
     if (arg === 'list' || arg === 'status') return { text: await describe($, await refresh($)) }
     if (arg === 'off') return { text: await switchOff($) }
-    if (word === 'unbundle') return { text: await removeBundle($, rest.join(' ')) }
-    if (word === 'bundle') {
-      await ensureServer($)
-      return { text: await makeBundle($, rest) }
-    }
     await ensureServer($)
     if (word === 'on') return { text: await switchOn($, rest.join(' ')) }
     if (arg) return { text: await choose($, arg) }

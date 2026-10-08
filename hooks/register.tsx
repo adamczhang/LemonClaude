@@ -442,8 +442,10 @@ async function ctxSize($: $): Promise<number> {
   return Number.isInteger(said) && said > 0 ? Math.max(MIN_CTX_SIZE, said) : DEFAULT_CTX_SIZE
 }
 
+/** A window's size with its article, as said aloud: `a 64K`, `an 8K`, `an 11K`, `an 18K`, `an 80K`. */
 function windowName(ctx: number): string {
-  return ctx % 1024 === 0 ? `${ctx / 1024}K` : `${ctx}-token`
+  const size = ctx % 1024 === 0 ? `${ctx / 1024}K` : `${ctx}-token`
+  return `${/^(8|11|18)(\D|$)/.test(size) ? 'an' : 'a'} ${size}`
 }
 
 /**
@@ -652,7 +654,7 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
         ? ` The GPU is overcommitted by about ${gb} GB: when the programs on it are busy at once, Windows swaps them ` +
           `through system memory, and this model will be slow. ${remedy}`
         : ''
-  return { ok: true, message: `Loaded ${model} with a ${windowName(ctx)} window.${room}${slow}` }
+  return { ok: true, message: `Loaded ${model} with ${windowName(ctx)} window.${room}${slow}` }
 }
 
 // The last toast and when: requests that arrive together (a step and its subagents') say a thing once.

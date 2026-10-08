@@ -890,6 +890,14 @@ describe('sharing Lemonade', () => {
     expect(toasts.some(t => t.includes('Loaded Gemma-Chat-GGUF with a 64K window. Lemonade unloaded Qwen3.5-4B-GGUF to make room.'))).toBe(true)
   })
 
+  test('an 8K window reads as one', async ($, on) => {
+    const { session, toasts } = world(on, { LEMONCLAUDE_CTX_SIZE: '8192' })
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(toasts.some(t => t.includes('Loaded Gemma-Chat-GGUF with an 8K window.'))).toBe(true)
+  })
+
   test('LEMONCLAUDE_CTX_SIZE sets the window, never under 4096', async ($, on) => {
     const { session, lemonade: server } = world(on, { LEMONCLAUDE_CTX_SIZE: '1024' })
     await start($)

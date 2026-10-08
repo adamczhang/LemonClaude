@@ -890,6 +890,16 @@ describe('sharing Lemonade', () => {
     expect(toasts.some(t => t.includes('Loaded Gemma-Chat-GGUF with a 64K window. Lemonade unloaded Qwen3.5-4B-GGUF to make room.'))).toBe(true)
   })
 
+  for (const [ctx, said] of [['81920', 'an 80K'], ['8192', 'an 8K'], ['11264', 'an 11K'], ['131072', 'a 128K'], ['10000', 'a 10000-token']]) {
+    test(`a window of ${ctx} reads as ${said}`, async ($, on) => {
+      const { session, toasts } = world(on, { LEMONCLAUDE_CTX_SIZE: ctx! })
+      await start($)
+      session.model = 'Gemma-Chat-GGUF'
+      await step($, session.model)
+      expect(toasts.some(t => t.includes(`Loaded Gemma-Chat-GGUF with ${said} window.`))).toBe(true)
+    })
+  }
+
   test('an 8K window reads as one', async ($, on) => {
     const { session, toasts } = world(on, { LEMONCLAUDE_CTX_SIZE: '8192' })
     await start($)

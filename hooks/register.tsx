@@ -442,10 +442,13 @@ async function ctxSize($: $): Promise<number> {
   return Number.isInteger(said) && said > 0 ? Math.max(MIN_CTX_SIZE, said) : DEFAULT_CTX_SIZE
 }
 
-/** A window's size with its article, as said aloud: `a 64K`, `an 8K`, `an 11K`, `an 18K`, `an 80K`. */
+/**
+ * A window's size with its article, as said aloud: an 8K, an 80K, an 8192-token (eight...), an 11K, an
+ * 18K (eleven, eighteen), and a 64K, a 128K otherwise.
+ */
 function windowName(ctx: number): string {
   const size = ctx % 1024 === 0 ? `${ctx / 1024}K` : `${ctx}-token`
-  return `${/^(8|11|18)(\D|$)/.test(size) ? 'an' : 'a'} ${size}`
+  return `${/^(8|1[18](\d{3})*(\D|$))/.test(size) ? 'an' : 'a'} ${size}`
 }
 
 /**

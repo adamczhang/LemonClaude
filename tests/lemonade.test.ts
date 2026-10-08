@@ -275,6 +275,99 @@ describe('starting Lemonade', () => {
   })
 })
 
+describe('/lemonade on and off', () => {
+  test('/lemonade on sends requests to the offered model whatever the selector shows', async ($, on) => {
+    const { env, asked } = world(on, { ANTHROPIC_BASE_URL: 'https://gateway.example' })
+    await start($)
+    const { text } = await lemonade($, 'on')
+    expect(text).toContain('Requests now go to 🍋 Qwen3.5-4B-GGUF')
+    expect(env.get('ANTHROPIC_BASE_URL')).toBe('http://127.0.0.1:13305')
+    // The desktop picker still says Opus; requests, subagents' included, go to Lemonade.
+    await step($)
+    await step($, 'claude-haiku-4-5', 'agent-1')
+    expect((await lemonade($, 'off')).text).toContain('Claude answers')
+    await step($)
+    expect(asked).toEqual([
+      'Qwen3.5-4B-GGUF @ http://127.0.0.1:13305',
+      'Qwen3.5-4B-GGUF @ http://127.0.0.1:13305',
+      'claude-opus-5-5 @ https://gateway.example',
+    ])
+    expect(env.has('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')).toBe(false)
+  })
+
+  test('/lemonade on <model> offers that model and switches to it', async ($, on) => {
+    const { env, asked } = world(on)
+    await start($)
+    const { text } = await lemonade($, 'on gemma')
+    expect(text).toContain('Requests now go to 🍋 Gemma-Chat-GGUF')
+    expect(text).toContain('tool-calling')
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Gemma-Chat-GGUF')
+    await step($)
+    expect(asked).toEqual(['Gemma-Chat-GGUF @ http://127.0.0.1:13305'])
+  })
+
+  test('/lemonade on refuses a model it cannot find and stays off', async ($, on) => {
+    const { asked } = world(on)
+    await start($)
+    expect((await lemonade($, 'on whisper')).text).toContain('No downloaded Lemonade chat model')
+    await step($)
+    expect(asked).toEqual(['claude-opus-5-5 @ default'])
+  })
+
+  test("/lemonade on needs a model when the entry is the person's own", async ($, on) => {
+    const { asked } = world(on, { ANTHROPIC_CUSTOM_MODEL_OPTION: 'my-gateway-model' })
+    await start($)
+    expect((await lemonade($, 'on')).text).toContain('Name one: /lemonade on <model>')
+    await step($)
+    expect(asked).toEqual(['claude-opus-5-5 @ default'])
+  })
+
+  test('/lemonade <model> while on moves requests to the new model', async ($, on) => {
+    const { asked } = world(on)
+    await start($)
+    await lemonade($, 'on')
+    expect((await lemonade($, 'gemma')).text).toContain('Requests go to it now')
+    await step($)
+    expect(asked).toEqual(['Gemma-Chat-GGUF @ http://127.0.0.1:13305'])
+  })
+
+  test('/lemonade off leaves a session whose selector has 🍋 on Lemonade', async ($, on) => {
+    const { session, asked } = world(on)
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    await lemonade($, 'on')
+    expect((await lemonade($, 'off')).text).toContain('still go to Lemonade')
+    await step($, session.model)
+    expect(asked).toEqual(['Qwen3.5-4B-GGUF @ http://127.0.0.1:13305'])
+  })
+
+  test('/lemonade on starts Lemonade Server; /lemonade off does not', async ($, on) => {
+    const { runs } = world(on, WINDOWS, { reachable: false, installed: true })
+    await start($)
+    await lemonade($, 'off')
+    expect(runs).toEqual([])
+    await lemonade($, 'on')
+    expect(runs.length).toBe(1)
+  })
+
+  test('ending the session turns it off', async ($, on) => {
+    const { env, asked } = world(on)
+    await start($)
+    await lemonade($, 'on')
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { kind: 'none' } as never })
+    expect(env.has('ANTHROPIC_BASE_URL')).toBe(false)
+    await step($)
+    expect(asked).toEqual(['claude-opus-5-5 @ default'])
+  })
+
+  test('/lemonade list says when it is on', async ($, on) => {
+    world(on)
+    await start($)
+    await lemonade($, 'on')
+    expect((await lemonade($, 'list')).text).toContain('Requests go to Qwen3.5-4B-GGUF via Lemonade (/lemonade on')
+  })
+})
+
 describe('routing', () => {
   test('picking the entry sends requests to Lemonade; picking Claude sends them back', async ($, on) => {
     const { env, asked, session } = world(on, { ANTHROPIC_BASE_URL: 'https://gateway.example' })

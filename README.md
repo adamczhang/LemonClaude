@@ -6,7 +6,7 @@
 
 Run Claude Code on a local model. LemonClaude is a Claude Code mod that adds a [Lemonade](https://github.com/lemonade-sdk/lemonade) model to Claude Code's model selector. Pick 🍋 and requests go to the model on your machine. Pick a Claude model and they go back to Claude. You don't need to restart.
 
-- **One model selector.** Lemonade appears next to Opus, Sonnet and Haiku, and `/model <id>` works too.
+- **One model selector.** In the terminal, Lemonade appears next to Opus, Sonnet and Haiku, and `/model <id>` works too. In the desktop app, `/lemonade on` switches instead.
 - **Switch mid-session.** The conversation carries on. Only where the next request goes changes.
 - **Subagents follow.** While 🍋 is selected, every request goes to Lemonade, subagents included.
 - **Starts Lemonade for you.** On Windows, picking 🍋 starts Lemonade Server if it isn't running.
@@ -20,7 +20,7 @@ Run Claude Code on a local model. LemonClaude is a Claude Code mod that adds a [
 | [Lemonade Server](https://github.com/lemonade-sdk/lemonade) | 2026.40.0 or later, which serves the Anthropic-compatible `/v1/messages` |
 | A downloaded chat model | For Claude Code's tools to work, pick one Lemonade labels `tool-calling` |
 
-LemonClaude was developed on Windows 11. The mod runs inside Claude Code and makes no OS calls of its own, so it should work anywhere Claude Code and Lemonade run.
+LemonClaude was developed on Windows 11. Apart from starting Lemonade Server, which is Windows only, it runs entirely inside Claude Code, so it should work anywhere Claude Code and Lemonade run.
 
 ## Install
 
@@ -46,26 +46,43 @@ On Windows, escape the backslashes, as in `"D:\\Projects\\LemonClaude"`.
 
 ## Use
 
-1. Download a chat model with Lemonade, for example with `lemonade pull`. On Windows, LemonClaude starts Lemonade Server when it needs it. Elsewhere, start it yourself.
-2. Start Claude Code. The model selector (`/model`) now shows an entry such as `🍋 Qwen3.5-4B-GGUF · Local via Lemonade`.
-3. Pick it. The status line shows `🍋 <model> (Lemonade)` while requests go to Lemonade.
-4. To go back, pick any Claude model.
+First, download a chat model with Lemonade, for example with `lemonade pull`. On Windows, LemonClaude starts Lemonade Server when it needs it. Elsewhere, start it yourself.
 
-Claude Code allows only one custom entry in the selector. LemonClaude offers the model you chose last time. The first time, it offers the first downloaded model that supports tool calling. To offer a different model:
+### In the terminal
+
+1. Start `claude`. The model selector (`/model`) now shows an entry such as `🍋 Qwen3.5-4B-GGUF · Local via Lemonade`.
+2. Pick it. The status line shows `🍋 <model> (Lemonade)` while requests go to Lemonade.
+3. To go back, pick any Claude model.
+
+### In the desktop app
+
+The desktop app's model picker lists only Claude models, so the 🍋 entry doesn't appear there. Use commands instead:
+
+1. Type `/lemonade on`. Every request now goes to the Lemonade model, subagents included, and the status line shows `🍋 <model> (Lemonade)`. The picker keeps showing the Claude model it had.
+2. Type `/lemonade off` to go back to that Claude model.
+
+`/lemonade on` and `/lemonade off` work in the terminal too.
+
+### Commands
+
+Claude Code allows only one custom entry in the selector. LemonClaude offers the model you chose last time. The first time, it offers the first downloaded model that supports tool calling.
 
 | Command | What it does |
 | --- | --- |
+| `/lemonade on` | Sends every request to the offered Lemonade model, whatever the model selector shows |
+| `/lemonade on <model>` | Offers that model and switches to it |
+| `/lemonade off` | Requests follow the model selector again |
 | `/lemonade` | Opens a picker of downloaded chat models, showing size, tool support and whether each is loaded |
 | `/lemonade <model>` | Offers that model. It takes the exact id or any unique part of it, such as `/lemonade qwen` |
 | `/lemonade list` | Lists the models, what the selector offers, and where requests go now |
 
-If 🍋 is already selected, changing the model moves the session to the new one at once.
+If requests already go to Lemonade, changing the model moves them to the new one at once.
 
 ### When Lemonade isn't running
 
 The entry still appears, offering the model from last time.
 
-- **On Windows**, its description says Lemonade starts when picked. When a request is about to go to Lemonade and the server doesn't answer, LemonClaude starts it, the way the Start menu shortcut does, and waits up to 60 seconds for it. A toast says "Starting Lemonade Server…". Then the request goes ahead. `/lemonade` and `/lemonade <model>` start it too, but `/lemonade list` doesn't. The server keeps running after the session ends.
+- **On Windows**, its description says Lemonade starts when picked. When a request is about to go to Lemonade and the server doesn't answer, LemonClaude starts it, the way the Start menu shortcut does, and waits up to 60 seconds for it. A toast says "Starting Lemonade Server…". Then the request goes ahead. `/lemonade`, `/lemonade on` and `/lemonade <model>` start it too, but `/lemonade list` and `/lemonade off` don't. The server keeps running after the session ends.
 - **Elsewhere**, or when Lemonade Server isn't installed in the usual place, the description says to start Lemonade first. Start it before picking the entry.
 
 Either way, if Lemonade still doesn't answer, a toast says so and suggests picking a Claude model.
@@ -82,7 +99,7 @@ Either way, if Lemonade still doesn't answer, a toast says so and suggests picki
 ## How it works
 
 - **The selector entry** comes from Claude Code's `ANTHROPIC_CUSTOM_MODEL_OPTION`, `_NAME` and `_DESCRIPTION` variables. LemonClaude sets them when the session starts.
-- **Routing** happens in a `turn.step` hook, which reads the session's selected model before each request.
+- **Routing** happens in a `turn.step` hook, which reads the session's selected model before each request. While `/lemonade on` holds, the hook treats the offered Lemonade model as selected.
   - **Lemonade model selected:** the hook saves the original values, then points `ANTHROPIC_BASE_URL` at Lemonade and sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. Claude Code reads both on every request, and each request names the Lemonade model.
   - **Claude model selected:** the hook restores the saved values.
 - **Starting Lemonade:** before each request to Lemonade, the hook checks the server's `/api/v1/health`. If the server doesn't answer, the hook runs `LemonadeServer.exe --silent` from `%LOCALAPPDATA%\lemonade_server\bin` through PowerShell's `Start-Process`. That detaches the server from Claude Code, so it outlives the session. LemonClaude only does this when `LEMONADE_BASE_URL` points at this machine. Requests that find the server down at the same time share one start.
@@ -91,7 +108,8 @@ Either way, if Lemonade still doesn't answer, a toast says so and suggests picki
 
 ## Known limitations
 
-- **Disabling the mod:** pick a Claude model before you disable LemonClaude. Otherwise the environment keeps pointing at Lemonade until the session ends.
+- **Desktop model picker:** the desktop app's picker lists only Claude models and doesn't show the 🍋 entry. Use `/lemonade on`. While it's on, the picker still names a Claude model.
+- **Disabling the mod:** pick a Claude model, or run `/lemonade off`, before you disable LemonClaude. Otherwise the environment keeps pointing at Lemonade until the session ends.
 - **Selector refresh:** `/lemonade <model>` updates the entry at once, but a selector that caches its list may show the change only in a new session. `/model <id>` works right away.
 - **Starting Lemonade:** only on Windows, and only with Lemonade Server installed by its Windows installer in `%LOCALAPPDATA%\lemonade_server`. LemonClaude never stops the server it starts.
 - **API keys:** a Lemonade server that requires `LEMONADE_API_KEY` isn't supported yet.

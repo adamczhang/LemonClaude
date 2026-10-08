@@ -26,6 +26,8 @@ declare module 'claude-code' {
       saved: SavedEnv | null
       models: LemonadeModel[]
       notice: string
+      /** True while /lemonade on sends every request to the offered model, whatever the session's model. */
+      isOn: boolean
     }
   }
 }

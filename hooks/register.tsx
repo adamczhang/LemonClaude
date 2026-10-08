@@ -13,6 +13,7 @@ const routed = atom({ plugin: 'lemonclaude', key: 'routed' } as const, null as s
 const saved = atom({ plugin: 'lemonclaude', key: 'saved' } as const, null as SavedEnv | null)
 const models = atom({ plugin: 'lemonclaude', key: 'models' } as const, [] as LemonadeModel[])
 const notice = atom({ plugin: 'lemonclaude', key: 'notice' } as const, '')
+const isOn = atom({ plugin: 'lemonclaude', key: 'isOn' } as const, false)
 
 type $ = EngineInterface
 
@@ -212,14 +213,18 @@ export async function route($: $, model: string | null): Promise<void> {
   $.ui.status(model ? `🍋 ${model} (Lemonade)` : undefined)
 }
 
-/** The Lemonade model the session runs on, or null when it runs on Claude. */
+/**
+ * The Lemonade model the session runs on, or null when it runs on Claude: the offered model while
+ * `/lemonade on` holds, else the session's model when it is a Lemonade one.
+ */
 async function lemonadeModelOf($: $, sessionModel: string): Promise<string | null> {
+  if (await read($, isOn)) return read($, offered)
   if (sessionModel === (await read($, offered))) return sessionModel
   return (await read($, models)).some(m => m.id === sessionModel) ? sessionModel : null
 }
 
-/** `/lemonade <model>`: makes the selector's Lemonade entry name that model. */
-export async function choose($: $, query: string): Promise<string> {
+/** Offers the model `query` names; resolves that model, or why there is none. */
+async function offerQuery($: $, query: string): Promise<LemonadeModel | string> {
   const list = await refresh($)
   const problem = await read($, notice)
   if (problem && list.length === 0) return `${problem}. Start Lemonade Server and try again.`
@@ -230,10 +235,48 @@ export async function choose($: $, query: string): Promise<string> {
   await offer($, found)
   // A session already on Lemonade moves to the new model at once.
   if (await read($, routed)) await route($, found.id)
+  return found
+}
 
-  const warn = found.hasTools ? '' : ' Lemonade does not label it tool-calling, so Claude Code tools may fail.'
-  const load = found.isLoaded ? '' : ' It loads on its first request, which takes a few seconds.'
-  return `The model selector now offers 🍋 ${found.id}. Pick it there (or /model ${found.id}); pick a Claude model to go back.${load}${warn}`
+function caveats(m: LemonadeModel): string {
+  const load = m.isLoaded ? '' : ' It loads on its first request, which takes a few seconds.'
+  const warn = m.hasTools ? '' : ' Lemonade does not label it tool-calling, so Claude Code tools may fail.'
+  return `${load}${warn}`
+}
+
+/** `/lemonade <model>`: makes the selector's Lemonade entry name that model. */
+export async function choose($: $, query: string): Promise<string> {
+  const found = await offerQuery($, query)
+  if (typeof found === 'string') return found
+  const how = (await read($, isOn))
+    ? 'Requests go to it now; /lemonade off goes back.'
+    : `Pick it there (or /model ${found.id}, or /lemonade on); pick a Claude model to go back.`
+  return `The model selector now offers 🍋 ${found.id}. ${how}${caveats(found)}`
+}
+
+/**
+ * `/lemonade on [model]`: every request goes to the offered Lemonade model, whatever the session's
+ * model, until `/lemonade off`. For pickers that don't list the entry, such as the desktop app's.
+ */
+async function switchOn($: $, query: string): Promise<string> {
+  const named = query ? await offerQuery($, query) : undefined
+  if (typeof named === 'string') return named
+  const id = await read($, offered)
+  if (!id) return 'The model selector offers no Lemonade model. Name one: /lemonade on <model>.'
+  await update($, isOn, () => true)
+  await route($, id)
+  const m = named ?? (await read($, models)).find(x => x.id === id)
+  return `Requests now go to 🍋 ${id} via Lemonade, whatever the model selector shows. /lemonade off goes back.${m ? caveats(m) : ''}`
+}
+
+/** `/lemonade off`: requests follow the session's model again. */
+async function switchOff($: $): Promise<string> {
+  await update($, isOn, () => false)
+  const model = await lemonadeModelOf($, await $.session.model())
+  await route($, model)
+  return model
+    ? `Requests follow the model selector again. It has 🍋 ${model} selected, so they still go to Lemonade.`
+    : 'Requests follow the model selector again, so Claude answers.'
 }
 
 async function describe($: $): Promise<string> {
@@ -241,8 +284,9 @@ async function describe($: $): Promise<string> {
   const problem = await read($, notice)
   const now = await read($, routed)
   const shown = await read($, offered)
+  const held = (await read($, isOn)) ? ' (/lemonade on; /lemonade off goes back)' : ''
   return [
-    now ? `Requests go to ${now} via Lemonade.` : 'Claude answers; pick 🍋 in the model selector to use Lemonade.',
+    now ? `Requests go to ${now} via Lemonade${held}.` : 'Claude answers; pick 🍋 in the model selector, or /lemonade on, to use Lemonade.',
     shown ? `The selector offers: 🍋 ${shown}` : 'The selector offers no Lemonade model yet.',
     problem || 'Downloaded chat models:',
     ...list.map(m => `${m.id === shown ? '* ' : '  '}${m.id} (${describeModel(m)})`),
@@ -254,7 +298,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'lemonade',
-      description: 'Choose which Lemonade model the model selector offers (/lemonade <model>, /lemonade list)',
+      description: 'Use a local Lemonade model (/lemonade on, /lemonade off, /lemonade <model>, /lemonade list)',
     })
 
     // A hot reload keeps $.state: the offer and the routing still stand.
@@ -280,14 +324,18 @@ export const register: Register = on => {
 
   // Hand the environment back when the conversation ends; the next step routes again from the session's model.
   on('session.end', async ($, e, next) => {
+    await update($, isOn, () => false)
     await route($, null)
     return next(e)
   })
 
   on('command.run', { command: 'lemonade' }, async ($, e) => {
     const arg = e.args.trim()
+    const [word = '', ...rest] = arg.split(/\s+/)
     if (arg === 'list' || arg === 'status') return { text: await describe($) }
+    if (arg === 'off') return { text: await switchOff($) }
     await ensureServer($)
+    if (word === 'on') return { text: await switchOn($, rest.join(' ')) }
     if (arg) return { text: await choose($, arg) }
 
     await refresh($)
@@ -335,7 +383,7 @@ export const register: Register = on => {
             onSelect={value => void pickOne(value)}
           />
         )}
-        <Text dimColor>Enter chooses · Esc closes · then pick 🍋 in the model selector</Text>
+        <Text dimColor>Enter chooses · Esc closes · then pick 🍋 in the model selector, or /lemonade on</Text>
       </Box>
     )
   })

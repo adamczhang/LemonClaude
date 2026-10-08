@@ -9,6 +9,7 @@ Run Claude Code on a local model. LemonClaude is a Claude Code mod that adds a [
 - **One model selector.** Lemonade appears next to Opus, Sonnet and Haiku, and `/model <id>` works too.
 - **Switch mid-session.** The conversation carries on. Only where the next request goes changes.
 - **Subagents follow.** While 🍋 is selected, every request goes to Lemonade, subagents included.
+- **Starts Lemonade for you.** On Windows, picking 🍋 starts Lemonade Server if it isn't running.
 - **Nothing is left behind.** The environment is restored when you pick Claude again and when the session ends.
 
 ## Requirements
@@ -45,7 +46,7 @@ On Windows, escape the backslashes, as in `"D:\\Projects\\LemonClaude"`.
 
 ## Use
 
-1. Start Lemonade Server and download a chat model, for example with `lemonade pull`.
+1. Download a chat model with Lemonade, for example with `lemonade pull`. On Windows, LemonClaude starts Lemonade Server when it needs it. Elsewhere, start it yourself.
 2. Start Claude Code. The model selector (`/model`) now shows an entry such as `🍋 Qwen3.5-4B-GGUF · Local via Lemonade`.
 3. Pick it. The status line shows `🍋 <model> (Lemonade)` while requests go to Lemonade.
 4. To go back, pick any Claude model.
@@ -62,7 +63,12 @@ If 🍋 is already selected, changing the model moves the session to the new one
 
 ### When Lemonade isn't running
 
-The entry still appears, offering the model from last time, and its description says Lemonade isn't running. Start Lemonade before picking it. If Lemonade doesn't answer a request, a toast says so and suggests picking a Claude model.
+The entry still appears, offering the model from last time.
+
+- **On Windows**, its description says Lemonade starts when picked. When a request is about to go to Lemonade and the server doesn't answer, LemonClaude starts it, the way the Start menu shortcut does, and waits up to 60 seconds for it. A toast says "Starting Lemonade Server…". Then the request goes ahead. `/lemonade` and `/lemonade <model>` start it too, but `/lemonade list` doesn't. The server keeps running after the session ends.
+- **Elsewhere**, or when Lemonade Server isn't installed in the usual place, the description says to start Lemonade first. Start it before picking the entry.
+
+Either way, if Lemonade still doesn't answer, a toast says so and suggests picking a Claude model.
 
 ## Configuration
 
@@ -70,6 +76,7 @@ The entry still appears, offering the model from last time, and its description 
 | --- | --- | --- |
 | `LEMONADE_BASE_URL` | `http://127.0.0.1:13305` | Where Lemonade Server listens |
 | `LEMONCLAUDE_LEMONADE_MODEL` | `Qwen3.5-4B-GGUF` | The model to offer while Lemonade is down and no earlier choice is remembered |
+| `LEMONCLAUDE_AUTOSTART` | on | Set to `0` so LemonClaude never starts Lemonade Server |
 | `ANTHROPIC_CUSTOM_MODEL_OPTION` | — | If you've set this yourself for something other than Lemonade, LemonClaude leaves your entry alone |
 
 ## How it works
@@ -78,6 +85,7 @@ The entry still appears, offering the model from last time, and its description 
 - **Routing** happens in a `turn.step` hook, which reads the session's selected model before each request.
   - **Lemonade model selected:** the hook saves the original values, then points `ANTHROPIC_BASE_URL` at Lemonade and sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. Claude Code reads both on every request, and each request names the Lemonade model.
   - **Claude model selected:** the hook restores the saved values.
+- **Starting Lemonade:** before each request to Lemonade, the hook checks the server's `/api/v1/health`. If the server doesn't answer, the hook runs `LemonadeServer.exe --silent` from `%LOCALAPPDATA%\lemonade_server\bin` through PowerShell's `Start-Process`. That detaches the server from Claude Code, so it outlives the session. LemonClaude only does this when `LEMONADE_BASE_URL` points at this machine. Requests that find the server down at the same time share one start.
 - **Session end:** the environment is also restored when the session ends, including on `/clear`.
 - **Model aliases:** unlike `lemonade launch claude`, LemonClaude leaves the `ANTHROPIC_DEFAULT_*_MODEL` aliases alone. Pointing them at Lemonade would make picking Opus resolve to the Lemonade model.
 
@@ -85,6 +93,7 @@ The entry still appears, offering the model from last time, and its description 
 
 - **Disabling the mod:** pick a Claude model before you disable LemonClaude. Otherwise the environment keeps pointing at Lemonade until the session ends.
 - **Selector refresh:** `/lemonade <model>` updates the entry at once, but a selector that caches its list may show the change only in a new session. `/model <id>` works right away.
+- **Starting Lemonade:** only on Windows, and only with Lemonade Server installed by its Windows installer in `%LOCALAPPDATA%\lemonade_server`. LemonClaude never stops the server it starts.
 - **API keys:** a Lemonade server that requires `LEMONADE_API_KEY` isn't supported yet.
 - **Context window:** Claude Code budgets context as if it were talking to Claude. The real limit is the `ctx_size` Lemonade sets for the model.
 - **Background calls:** Claude Code may print an `unrecognized_model` notice. Its background calls (session titles and similar) ask for Claude models, and Lemonade answers them with a 404 while 🍋 is selected.
@@ -96,6 +105,7 @@ The entry still appears, offering the model from last time, and its description 
 | --- | --- |
 | No 🍋 entry in the selector | Check the mod is loaded: run `/lemonade list`. If the command is unknown, check `--plugin-dir` or `CLAUDE_CODE_PLUGIN_DIRS` |
 | "Lemonade didn't answer" toast | Start Lemonade Server, or check `LEMONADE_BASE_URL` |
+| "Lemonade Server didn't answer … within 60 s of starting" | Start Lemonade Server from the Start menu and check it runs. Its tray icon opens the logs |
 | The first reply is slow | Lemonade loads the model on its first request |
 | Tools fail or the model ignores them | Pick a model labeled `tool-calling` (`/lemonade list` shows `tools`) |
 | Requests still go to Lemonade after removing the mod | Start a new session, or unset `ANTHROPIC_BASE_URL` in that shell |

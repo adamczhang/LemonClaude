@@ -6,6 +6,7 @@ import type { LemonadeModel, SavedEnv } from '../types'
 const PANE = 'lemonade-picker'
 const DEFAULT_BASE_URL = 'http://127.0.0.1:13305'
 const DEFAULT_MODEL = 'Qwen3.5-4B-GGUF'
+const START_TIMEOUT_S = 60
 
 const offered = atom({ plugin: 'lemonclaude', key: 'offered' } as const, null as string | null)
 const routed = atom({ plugin: 'lemonclaude', key: 'routed' } as const, null as string | null)
@@ -68,6 +69,71 @@ async function refresh($: $): Promise<LemonadeModel[]> {
   }
 }
 
+async function answers($: $, base: string): Promise<boolean> {
+  return $.http
+    .fetch(`${base}/api/v1/health`)
+    .then(r => r.ok)
+    .catch(() => false)
+}
+
+/**
+ * LemonadeServer.exe where Lemonade's Windows installer puts it, or null when LemonClaude shouldn't
+ * start a server: none installed there, a server that isn't on this machine, or LEMONCLAUDE_AUTOSTART=0.
+ */
+async function serverExe($: $): Promise<string | null> {
+  if ((await $.env.get('LEMONCLAUDE_AUTOSTART')) === '0') return null
+  if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/i.test(await baseUrl($))) return null
+  const appData = await $.env.get('LOCALAPPDATA')
+  if (!appData) return null
+  const exe = `${appData}\\lemonade_server\\bin\\LemonadeServer.exe`
+  return (await $.fs.exists(exe)) ? exe : null
+}
+
+// One start at a time: subagents' requests can find the server down together.
+let starting: Promise<boolean> | null = null
+
+/** Starts Lemonade Server and resolves true once it answers, false when it didn't within START_TIMEOUT_S. */
+function startServer($: $, exe: string, base: string): Promise<boolean> {
+  const quote = (s: string) => `'${s.replace(/'/g, "''")}'`
+  // Start-Process detaches the server, so it outlives this session as if started from the Start menu.
+  // The wait runs in PowerShell because a $ call costs the hook none of its budget and a sleep would.
+  const script = [
+    `Start-Process -FilePath ${quote(exe)} -ArgumentList '--silent' -WindowStyle Hidden`,
+    `$deadline = (Get-Date).AddSeconds(${START_TIMEOUT_S})`,
+    `while ((Get-Date) -lt $deadline) { try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri ${quote(`${base}/api/v1/health`)} | Out-Null; break } catch { Start-Sleep -Milliseconds 500 } }`,
+    '',
+  ].join('\n')
+  starting ??= $.process
+    .run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', '-'], {
+      stdin: script,
+      timeoutMs: (START_TIMEOUT_S + 15) * 1000,
+    })
+    .catch(() => undefined)
+    .then(() => answers($, base))
+    .finally(() => {
+      starting = null
+    })
+  return starting
+}
+
+/**
+ * Starts Lemonade Server when it isn't running and LemonClaude can start it. True when a start
+ * failed, which it has said in a toast.
+ */
+async function ensureServer($: $): Promise<boolean> {
+  const base = await baseUrl($)
+  if (await answers($, base)) return false
+  const exe = await serverExe($)
+  if (!exe) return false
+  $.ui.toast('Starting Lemonade Server…')
+  if (!(await startServer($, exe, base))) {
+    $.ui.toast(`Lemonade Server didn't answer at ${base} within ${START_TIMEOUT_S} s of starting. Start it yourself, or pick a Claude model.`)
+    return true
+  }
+  await refresh($)
+  return false
+}
+
 /** The one model `query` names: exact id first, then a unique case-insensitive substring. */
 export function pick(list: LemonadeModel[], query: string): LemonadeModel | string {
   const q = query.toLowerCase()
@@ -85,10 +151,11 @@ function describeModel(m: LemonadeModel): string {
 
 /**
  * Puts `m` in Claude Code's model selector, as the one custom entry it has. `isUp` false marks an
- * entry offered from memory while Lemonade did not answer.
+ * entry offered from memory while Lemonade did not answer; `canStart` says picking it starts Lemonade.
  */
-async function offer($: $, m: LemonadeModel, isUp = true): Promise<void> {
-  const detail = isUp ? describeModel(m) : `${m.size ? `${m.size} GB, ` : ''}Lemonade not running, start it first`
+async function offer($: $, m: LemonadeModel, isUp = true, canStart = false): Promise<void> {
+  const down = canStart ? 'Lemonade not running, starts when picked' : 'Lemonade not running, start it first'
+  const detail = isUp ? describeModel(m) : `${m.size ? `${m.size} GB, ` : ''}${down}`
   await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION', m.id)
   await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION_NAME', `🍋 ${m.id}`)
   await $.env.set('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION', `Local via Lemonade · ${detail}`)
@@ -98,7 +165,7 @@ async function offer($: $, m: LemonadeModel, isUp = true): Promise<void> {
 
 /**
  * What to offer while Lemonade is down: the model offered last time, else LEMONCLAUDE_LEMONADE_MODEL,
- * else the default. Picking it before Lemonade starts fails with a connection error, as the entry says.
+ * else the default. Picking it starts Lemonade where LemonClaude can, and fails otherwise, as the entry says.
  */
 async function rememberedOffer($: $): Promise<LemonadeModel> {
   const last = (await $.store.get('lastOffer')) as LemonadeModel | undefined
@@ -198,7 +265,7 @@ export const register: Register = on => {
       const remembered = await rememberedOffer($)
       if (!isUp) {
         // Lemonade is down: offer the remembered model anyway, unless the entry is the person's own.
-        if (!theirs || theirs === remembered.id) await offer($, remembered, false)
+        if (!theirs || theirs === remembered.id) await offer($, remembered, false, (await serverExe($)) !== null)
       } else {
         const preferred =
           list.find(m => m.id === theirs) ??
@@ -220,6 +287,7 @@ export const register: Register = on => {
   on('command.run', { command: 'lemonade' }, async ($, e) => {
     const arg = e.args.trim()
     if (arg === 'list' || arg === 'status') return { text: await describe($) }
+    await ensureServer($)
     if (arg) return { text: await choose($, arg) }
 
     await refresh($)
@@ -230,10 +298,12 @@ export const register: Register = on => {
   // Every model request follows the session's model: main loop and subagents alike go to Lemonade while it is picked.
   on('turn.step', async function* ($, e, next) {
     const model = await lemonadeModelOf($, await $.session.model())
+    // A failed start has said so already; the request goes on and fails as it would have.
+    const didStartFail = model ? await ensureServer($) : false
     await route($, model)
     const result = yield* next(model ? { ...e, model } : e)
     // No response from Lemonade is most often a server that isn't running.
-    if (model && result.stopReason === null && !next.signal.aborted) {
+    if (model && !didStartFail && result.stopReason === null && !next.signal.aborted) {
       $.ui.toast(`Lemonade didn't answer at ${await baseUrl($)}. Start Lemonade Server, or pick a Claude model.`)
     }
     return result

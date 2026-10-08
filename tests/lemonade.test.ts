@@ -12,17 +12,26 @@ const MODELS = {
 }
 const HEALTH = { all_models_loaded: [{ model_name: 'Qwen3.5-4B-GGUF' }] }
 
-type World = { env: Map<string, string>; asked: string[]; session: { model: string }; toasts: string[] }
+type World = { env: Map<string, string>; asked: string[]; session: { model: string }; toasts: string[]; runs: string[][]; stdin: string[] }
 
 /**
  * A fake Lemonade, an in-memory environment and store, a session model the test sets as the
  * model selector would, and a model that records which model and base URL each request used.
+ * `installed` puts LemonadeServer.exe where the Windows installer does; running the start command
+ * brings the fake Lemonade up unless `startFails`.
  */
-function world(on: On, initialEnv: Record<string, string> = {}, opts: { reachable?: boolean; store?: Record<string, unknown>; failSteps?: boolean } = {}): World {
+function world(
+  on: On,
+  initialEnv: Record<string, string> = {},
+  opts: { reachable?: boolean; store?: Record<string, unknown>; failSteps?: boolean; installed?: boolean; startFails?: boolean } = {},
+): World {
   const env = new Map(Object.entries(initialEnv))
   const asked: string[] = []
   const session = { model: 'claude-opus-5-5' }
   const toasts: string[] = []
+  const runs: string[][] = []
+  const stdin: string[] = []
+  let isUp = opts.reachable !== false
   mock.store(on, opts.store)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
@@ -41,8 +50,17 @@ function world(on: On, initialEnv: Record<string, string> = {}, opts: { reachabl
     else env.set(e.name, e.value)
     return { value: undefined }
   })
+  on('fs.exists', ($, e) => ({ value: !!opts.installed && e.path === `${env.get('LOCALAPPDATA')}\\lemonade_server\\bin\\LemonadeServer.exe` }))
+  on('process.run', async ($, e) => {
+    runs.push([...e.argv])
+    stdin.push(e.init?.stdin ?? '')
+    // Long enough for a second request to find the start under way.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    if (!opts.startFails) isUp = true
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('http.fetch', ($, e) => {
-    if (opts.reachable === false) return { deny: 'connection refused' }
+    if (!isUp) return { deny: 'connection refused' }
     const body = e.url.endsWith('/api/v1/models') ? MODELS : e.url.endsWith('/api/v1/health') ? HEALTH : undefined
     return body
       ? { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
@@ -53,7 +71,7 @@ function world(on: On, initialEnv: Record<string, string> = {}, opts: { reachabl
     if (opts.failSteps) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn' as const, usage: null }
   })
-  return { env, asked, session, toasts }
+  return { env, asked, session, toasts, runs, stdin }
 }
 
 async function start($: Engine) {
@@ -170,6 +188,90 @@ describe('model selector entry', () => {
     expect((await ui.find({ key: 'model' }))?.type).toBe('Select')
     await $.ui.select({ plugin: 'lemonclaude', key: 'model', value: 'Gemma-Chat-GGUF' })
     expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Gemma-Chat-GGUF')
+  })
+})
+
+const WINDOWS = { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' }
+const EXE = 'C:\\Users\\me\\AppData\\Local\\lemonade_server\\bin\\LemonadeServer.exe'
+
+describe('starting Lemonade', () => {
+  test('the entry says picking it starts Lemonade', async ($, on) => {
+    const { env } = world(on, WINDOWS, { reachable: false, installed: true })
+    await start($)
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION')).toBe('Local via Lemonade · Lemonade not running, starts when picked')
+  })
+
+  test('picking the entry starts Lemonade Server, then sends the request', async ($, on) => {
+    const { asked, session, toasts, runs, stdin } = world(on, WINDOWS, { reachable: false, installed: true })
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    expect(runs).toEqual([['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', '-']])
+    expect(stdin[0]).toContain(`Start-Process -FilePath '${EXE}' -ArgumentList '--silent'`)
+    expect(stdin[0]).toContain("'http://127.0.0.1:13305/api/v1/health'")
+    expect(asked).toEqual(['Qwen3.5-4B-GGUF @ http://127.0.0.1:13305'])
+    expect(toasts.some(t => t.includes('Starting Lemonade Server'))).toBe(true)
+    expect(toasts.some(t => t.includes("didn't answer"))).toBe(false)
+  })
+
+  test('requests that find Lemonade down together start it once', async ($, on) => {
+    const { asked, session, runs } = world(on, WINDOWS, { reachable: false, installed: true })
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    await Promise.all([step($, session.model), step($, 'claude-haiku-4-5', 'agent-1')])
+    expect(runs.length).toBe(1)
+    expect(asked.length).toBe(2)
+  })
+
+  test('a running Lemonade is left alone', async ($, on) => {
+    const { session, runs } = world(on, WINDOWS, { installed: true })
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    expect(runs).toEqual([])
+  })
+
+  test('says so when Lemonade Server does not come up', async ($, on) => {
+    const { asked, session, toasts } = world(on, WINDOWS, { reachable: false, installed: true, startFails: true, failSteps: true })
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    expect(asked).toEqual(['Qwen3.5-4B-GGUF @ http://127.0.0.1:13305'])
+    expect(toasts.filter(t => t.includes("didn't answer")).length).toBe(1)
+    expect(toasts.some(t => t.includes('within 60 s of starting'))).toBe(true)
+  })
+
+  test('/lemonade starts Lemonade Server to list its models', async ($, on) => {
+    const { env, runs } = world(on, WINDOWS, { reachable: false, installed: true })
+    await start($)
+    const { text } = await lemonade($, 'gemma')
+    expect(runs.length).toBe(1)
+    expect(text).toContain('now offers 🍋 Gemma-Chat-GGUF')
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Gemma-Chat-GGUF')
+  })
+
+  test('/lemonade list does not start it', async ($, on) => {
+    const { runs } = world(on, WINDOWS, { reachable: false, installed: true })
+    await start($)
+    await lemonade($, 'list')
+    expect(runs).toEqual([])
+  })
+
+  test('never starts a server for a Lemonade on another machine', async ($, on) => {
+    const { session, runs } = world(on, { ...WINDOWS, LEMONADE_BASE_URL: 'http://gpu-box:13305' }, { reachable: false, installed: true })
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    expect(runs).toEqual([])
+  })
+
+  test('LEMONCLAUDE_AUTOSTART=0 turns starting off', async ($, on) => {
+    const { env, session, runs } = world(on, { ...WINDOWS, LEMONCLAUDE_AUTOSTART: '0' }, { reachable: false, installed: true })
+    await start($)
+    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION')).toContain('start it first')
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    expect(runs).toEqual([])
   })
 })
 

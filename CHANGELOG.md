@@ -2,6 +2,13 @@
 
 All notable changes to LemonClaude are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- On Windows, starting Lemonade Server when a request is about to go to it and it isn't running, then waiting up to 60 seconds for it. `/lemonade` and `/lemonade <model>` start it too. The server is started detached, so it keeps running after the session. Set `LEMONCLAUDE_AUTOSTART=0` to turn this off.
+- The selector entry says "starts when picked" while Lemonade is down and LemonClaude can start it.
+
 ## [0.1.0] - 2026-10-07
 
 First release.
@@ -19,4 +26,5 @@ First release.
 - `LEMONADE_BASE_URL` for a server other than `http://127.0.0.1:13305`.
 - Restoring the original environment when you go back to Claude and when the session ends.
 
+[Unreleased]: https://github.com/adamczhang/LemonClaude/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/adamczhang/LemonClaude/releases/tag/v0.1.0

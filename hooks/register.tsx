@@ -123,7 +123,10 @@ export async function listCatalog($: $, base: string): Promise<{ models: Lemonad
     recipe?: string
     downloaded?: boolean
     suggested?: boolean
+    /** A bundle's models, by id. */
+    components?: string[]
   }>
+  const labelsOf = new Map(data.map(m => [m.id, m.labels ?? []]))
 
   const [now, system, held] = await Promise.all([
     loadedNow($, base),
@@ -167,7 +170,8 @@ export async function listCatalog($: $, base: string): Promise<{ models: Lemonad
       labels: m.labels ?? [],
       recipe: m.recipe ?? '',
       isDownloaded: m.downloaded !== false,
-      hasTools: (m.labels ?? []).includes('tool-calling'),
+      // A bundle calls tools through its chat model: Lemonade labels the model, not the bundle.
+      hasTools: [m.id, ...(m.components ?? [])].some(id => (labelsOf.get(id) ?? []).includes('tool-calling')),
       isLoaded: loaded.has(m.id),
       ...(fits(m.size, recipeOf(m.recipe ?? '')) ? {} : { isTooBig: true }),
       ...(loaded.get(m.id)?.pinned ? { pin: m.id in held ? ('mine' as const) : ('theirs' as const) } : {}),
@@ -390,7 +394,7 @@ function sizeRange(models: readonly LemonadeModel[]): string {
 
 function tags(m: LemonadeModel): string {
   const pin = m.pin === 'theirs' ? 'pinned by another app' : m.pin === 'mine' ? 'pinned' : ''
-  return [m.isTooBig ? 'too big' : '', m.hasTools ? 'tools' : '', ...['vision', 'reasoning', 'coding'].filter(l => m.labels.includes(l)), pin]
+  return [m.recipe === 'collection.omni' ? 'bundle' : '', m.isTooBig ? 'too big' : '', m.hasTools ? 'tools' : '', ...['vision', 'reasoning', 'coding'].filter(l => m.labels.includes(l)), pin]
     .filter(Boolean)
     .join(' · ')
 }
@@ -645,6 +649,8 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
     .map(m => m.model_name)
   await refresh($)
   const room = gone.length > 0 ? ` Lemonade unloaded ${gone.join(', ')} to make room.` : ''
+  // Lemonade loads a bundle's models with their own settings, not the window asked for.
+  if (known.recipe === 'collection.omni') return { ok: true, message: `Loaded the Omni bundle ${model}.${room}` }
   // Whether it fit: the process that runs it, on this machine, measured on Windows.
   const pid = after.find(m => m.model_name === model)?.pid
   const fit = pid && (await isLocal($)) ? await spilled($, pid, known.size) : null
@@ -674,6 +680,13 @@ function say($: $, text: string): void {
  * True for a subagent of another plugin's agent type (`other:worker`): that plugin answers its steps
  * itself, perhaps from a local model of its own, so LemonClaude leaves them untouched.
  */
+const NO_NODE = 'Omni bundles run through a small proxy on Node.js, and Node could not start. Install Node.js, or pick a single model.'
+
+/** Why `model` can't be served now, if it's a bundle and its proxy can't run; else nothing. */
+async function bundleProblem($: $, model: string): Promise<string | undefined> {
+  return (await isBundle($, model)) && (await omniProxy($)) === null ? NO_NODE : undefined
+}
+
 async function isOthersAgent($: $, agentId: string): Promise<boolean> {
   // A list that can't be read means no agent known to be another's: the step routes as any other.
   const agent = (await $.agent.list().catch(() => [])).find(a => a.id === agentId)
@@ -803,24 +816,80 @@ async function applyEnv($: $, env: SavedEnv): Promise<void> {
   await $.env.set('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ?? undefined)
 }
 
+/** True for an Omni bundle: a collection of models Lemonade runs as one (`collection.omni`). */
+async function isBundle($: $, model: string): Promise<boolean> {
+  return (await read($, catalog)).some(m => m.id === model && m.recipe === 'collection.omni')
+}
+
+// The Omni proxy for this session, as its URL once it listens, or null when it can't run. A module
+// variable: a reload starts another, and one that exits is started again by the next request.
+let proxy: Promise<string | null> | null = null
+
+/**
+ * The URL of LemonClaude's Omni proxy, started when a bundle first needs it. Lemonade runs a bundle
+ * only on its OpenAI-style chat completions, and Claude Code speaks Anthropic's Messages API; the
+ * proxy (proxy/omni-proxy.mjs, on Node) translates, and saves the images and audio a bundle makes.
+ * Null when it can't start, as without Node.
+ */
+function omniProxy($: $): Promise<string | null> {
+  proxy ??= startProxy($)
+  return proxy
+}
+
+async function startProxy($: $): Promise<string | null> {
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '.'
+  const media = (await $.env.get('LEMONCLAUDE_MEDIA_DIR')) ?? `${home}/.lemonclaude/media`
+  const child = $.process.spawn({
+    argv: ['node', `${$.plugin.root}/proxy/omni-proxy.mjs`, '--lemonade', await baseUrl($), '--media', media],
+  })
+  return new Promise<string | null>(resolve => {
+    // The loop is the child's life: it runs on for the session, and ends when the proxy does.
+    void (async () => {
+      let said = ''
+      try {
+        for await (const { stream, text } of child) {
+          if (stream !== 'stdout' || said === 'done') continue
+          said += text
+          const port = /listening (\d+)/.exec(said)?.[1]
+          if (port) {
+            said = 'done'
+            resolve(`http://127.0.0.1:${port}`)
+          }
+        }
+      } catch {
+        // It couldn't start: no Node, most likely.
+      }
+      resolve(null)
+      proxy = null
+    })()
+  })
+}
+
 /** Sends requests to Lemonade's `model`, or back to Claude for null; a no-op when already so. */
 export async function route($: $, model: string | null): Promise<void> {
   const was = await read($, routed)
-  if (was === model) return
+  // A bundle's requests go through the Omni proxy; a single model's straight to Lemonade.
+  const bundle = model !== null && (await isBundle($, model))
+  const target = model ? ((bundle ? await omniProxy($) : null) ?? (await baseUrl($))) : null
+  if (was === model) {
+    // Still routed there: a proxy that was started again listens on another port.
+    if (target && (await $.env.get('ANTHROPIC_BASE_URL')) !== target) await $.env.set('ANTHROPIC_BASE_URL', target)
+    return
+  }
   if (model) {
     // Keep the environment from before the first switch, so switching between Lemonade models still restores Claude's.
     if ((await read($, saved)) === null) {
       const env = await snapshot($)
       await update($, saved, () => env)
     }
-    await $.env.set('ANTHROPIC_BASE_URL', await baseUrl($))
+    await $.env.set('ANTHROPIC_BASE_URL', target ?? undefined)
   } else {
     const env = await read($, saved)
     if (env) await applyEnv($, env)
     await update($, saved, () => null as SavedEnv | null)
   }
   await update($, routed, () => model)
-  $.ui.status(model ? `🍋 ${model} (Lemonade)` : undefined)
+  $.ui.status(model ? `🍋 ${model} (Lemonade${bundle ? ' Omni' : ''})` : undefined)
   // Requests left that model: give back its pin, if LemonClaude held it, so other apps can use the slot.
   if (was) await release($, was)
 }
@@ -879,6 +948,8 @@ async function switchOn($: $, query: string): Promise<string> {
   if (typeof named === 'string') return named
   const id = await read($, offered)
   if (!id) return 'The model selector offers no Lemonade model. Name one: /lemonade on <model>.'
+  const problem = await bundleProblem($, id)
+  if (problem) return problem
   const loaded = await ensureLoaded($, id)
   if (!loaded.ok && loaded.message) return loaded.message
   const sessionModel = await $.session.model()
@@ -887,6 +958,58 @@ async function switchOn($: $, query: string): Promise<string> {
   const m = named ?? (await downloadedModels($)).find(x => x.id === id)
   const how = `Requests now go to 🍋 ${id} via Lemonade. /lemonade off, or picking another model, goes back.`
   return `${loaded.message ? `${loaded.message} ` : ''}${how}${m ? caveats(m) : ''}`
+}
+
+/** Every model Lemonade lists, any kind, by id: what a bundle may be made of. */
+async function everyModel($: $): Promise<Array<{ id: string; recipe?: string; labels?: string[]; downloaded?: boolean }>> {
+  const listed = await askLemonade($, `${await baseUrl($)}/api/v1/models?show_all=true`)
+  return listed.ok ? ((parsed(listed.text)?.data ?? []) as Array<{ id: string; recipe?: string; labels?: string[]; downloaded?: boolean }>) : []
+}
+
+/**
+ * `/lemonade bundle <name> <model> <model>...`: registers an Omni bundle of downloaded models, a chat
+ * model among them, as `user.<name>`. Only downloaded models: registering one that isn't would
+ * download it.
+ */
+async function makeBundle($: $, words: readonly string[]): Promise<string> {
+  const [name, ...wanted] = words
+  if (!name || wanted.length < 2) {
+    return 'Name the bundle and two or more downloaded models, a chat model among them: /lemonade bundle MyKit Qwen3.5-4B-GGUF SD-Turbo-GGUF'
+  }
+  const id = name.startsWith('user.') ? name : `user.${name}`
+  const all = await everyModel($)
+  if (all.length === 0) return "Lemonade isn't answering, so no bundle was made."
+  const parts: typeof all = []
+  for (const want of wanted) {
+    const exact = all.find(m => m.id.toLowerCase() === want.toLowerCase())
+    const like = all.filter(m => m.id.toLowerCase().includes(want.toLowerCase()) && m.downloaded)
+    const found = exact ?? (like.length === 1 ? like[0] : undefined)
+    if (!found) return like.length > 1 ? `"${want}" matches ${like.map(m => m.id).join(', ')}; name one.` : `Lemonade lists no model "${want}".`
+    if (found.downloaded === false) return `${found.id} isn't downloaded. Download it first: a bundle made of it would download it.`
+    parts.push(found)
+  }
+  if (!parts.some(m => (m.labels ?? []).includes('chat'))) return 'A bundle needs a chat model to answer: name one among its models.'
+  const made = await askLemonade($, `${await baseUrl($)}/api/v1/pull`, {
+    method: 'POST',
+    body: JSON.stringify({ model_name: id, recipe: 'collection.omni', components: parts.map(m => m.id) }),
+  }).catch((err: unknown): Answer => ({ ok: false, status: 0, text: JSON.stringify({ error: String(err) }) }))
+  if (!made.ok) return `Lemonade couldn't make ${id}: ${errorOf(made.text) ?? `it answered ${made.status}`}`
+  await refresh($)
+  const kinds = parts.map(m => `${m.id} (${(m.labels ?? []).filter(l => !['hot', 'mtp'].includes(l))[0] ?? m.recipe ?? 'model'})`)
+  return `Made the Omni bundle ${id}: ${kinds.join(', ')}. Use it with /lemonade on ${id}, or Use in /lemonade.`
+}
+
+/** `/lemonade unbundle <name>`: removes a bundle you made; its models stay downloaded. */
+async function removeBundle($: $, name: string): Promise<string> {
+  const id = name.startsWith('user.') ? name : `user.${name}`
+  if (!(await everyModel($)).some(m => m.id === id && m.recipe === 'collection.omni')) return `There's no bundle ${id} to remove.`
+  if ((await read($, routed)) === id) return `Requests go to ${id} now. Run /lemonade off first.`
+  const gone = await askLemonade($, `${await baseUrl($)}/api/v1/delete`, { method: 'POST', body: JSON.stringify({ model_name: id }) }).catch(
+    (err: unknown): Answer => ({ ok: false, status: 0, text: JSON.stringify({ error: String(err) }) }),
+  )
+  if (!gone.ok) return `Lemonade couldn't remove ${id}: ${errorOf(gone.text) ?? `it answered ${gone.status}`}`
+  await refresh($)
+  return `Removed the bundle ${id}. Its models stay downloaded.`
 }
 
 /** `/lemonade off`: requests follow the session's model again. */
@@ -922,7 +1045,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'lemonade',
-      description: 'Use a local Lemonade model: /lemonade opens the model list; /lemonade on, off, <model>, list',
+      description: 'Use a local Lemonade model: /lemonade opens the model list; /lemonade on, off, <model>, list, bundle, unbundle',
     })
 
     // Pins a session left when it ended without a goodbye (a crash) would hold Lemonade's slots for good.
@@ -963,6 +1086,11 @@ export const register: Register = on => {
     const [word = '', ...rest] = arg.split(/\s+/)
     if (arg === 'list' || arg === 'status') return { text: await describe($, await refresh($)) }
     if (arg === 'off') return { text: await switchOff($) }
+    if (word === 'unbundle') return { text: await removeBundle($, rest.join(' ')) }
+    if (word === 'bundle') {
+      await ensureServer($)
+      return { text: await makeBundle($, rest) }
+    }
     await ensureServer($)
     if (word === 'on') return { text: await switchOn($, rest.join(' ')) }
     if (arg) return { text: await choose($, arg) }
@@ -990,6 +1118,11 @@ export const register: Register = on => {
         const loaded = await ensureLoaded($, model)
         if (loaded.message) say($, loaded.message)
         hasSaidWhy = !loaded.ok && loaded.message !== undefined
+      }
+      const problem = hasSaidWhy ? undefined : await bundleProblem($, model)
+      if (problem) {
+        say($, problem)
+        hasSaidWhy = true
       }
     }
     await route($, model)

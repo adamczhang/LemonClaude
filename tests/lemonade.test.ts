@@ -42,6 +42,9 @@ type Lemonade = {
   loadError?: string
   /** /api/v1/system-info, when a test gives other hardware. */
   system?: typeof SYSTEM
+  /** Each bundle registered (a pull with recipe collection.omni), and each model deleted. */
+  bundles: Array<{ model_name: string; components: string[] }>
+  deleted: string[]
   /** What Windows' GPU counters say about each model's server process, as PowerShell prints it. */
   gpu?: string
   /** Each request that went out through curl, as `METHOD /path`. */
@@ -62,6 +65,8 @@ type World = {
   runs: string[][]
   stdin: string[]
   lemonade: Lemonade
+  /** Each process LemonClaude spawned (the Omni proxy), by argv. */
+  spawns: string[][]
   /** The session's subagents, as $.agent.list answers. */
   agents: Array<{ id: string; type: string; description: string; status: string }>
 }
@@ -75,7 +80,7 @@ type World = {
 function world(
   on: On,
   initialEnv: Record<string, string> = {},
-  opts: { reachable?: boolean; store?: Record<string, unknown>; failSteps?: boolean; installed?: boolean; startFails?: boolean } = {},
+  opts: { reachable?: boolean; store?: Record<string, unknown>; failSteps?: boolean; installed?: boolean; startFails?: boolean; noNode?: boolean } = {},
 ): World {
   const env = new Map(Object.entries(initialEnv))
   const asked: string[] = []
@@ -113,8 +118,18 @@ function world(
     loaded: [{ model_name: 'Qwen3.5-4B-GGUF', type: 'llm', pinned: false, recipe_options: { ctx_size: 262144 } }],
     loads: [],
     pins: [],
+    bundles: [],
+    deleted: [],
   }
   const agents: World['agents'] = []
+  const spawns: string[][] = []
+  // The Omni proxy: says where it listens, unless there's no Node to run it.
+  on('process.spawn', async function* ($, e) {
+    spawns.push([...e.argv])
+    if (opts.noNode) return { deny: 'spawn node ENOENT' }
+    yield { stream: 'stdout' as const, text: 'listening 4567\n' }
+    return { value: { code: 0, signal: null } }
+  })
   on('agent.list', () => ({ value: agents }) as never)
 
   /** The fake Lemonade answering one request, or null when it isn't up. */
@@ -174,7 +189,17 @@ function world(
     }
     else if (path === '/api/v1/downloads') body = lemonade.jobs
     else if (path === '/api/v1/system-info') body = lemonade.system ?? SYSTEM
-    else if (path === '/api/v1/pull' && method === 'POST') {
+    else if (path === '/api/v1/pull' && method === 'POST' && (JSON.parse(sent ?? '{}') as { recipe?: string }).recipe === 'collection.omni') {
+      const bundle = JSON.parse(sent ?? '{}') as { model_name: string; components: string[] }
+      lemonade.bundles.push(bundle)
+      lemonade.models.push({ id: bundle.model_name, size: 3, downloaded: true, suggested: false, recipe: 'collection.omni', labels: [] })
+      body = { model_name: bundle.model_name, status: 'success' }
+    } else if (path === '/api/v1/delete' && method === 'POST') {
+      const { model_name } = JSON.parse(sent ?? '{}') as { model_name: string }
+      lemonade.deleted.push(model_name)
+      lemonade.models = lemonade.models.filter(m => m.id !== model_name)
+      body = { status: 'success' }
+    } else if (path === '/api/v1/pull' && method === 'POST') {
       const pull = JSON.parse(sent ?? '{}') as { model_name: string }
       lemonade.pulls.push(pull)
       lemonade.jobs.push({ model_name: pull.model_name, status: 'downloading', running: true, percent: 0 })
@@ -219,7 +244,7 @@ function world(
     if (opts.failSteps) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn' as const, usage: null }
   })
-  return { env, asked, session, toasts, runs, stdin, lemonade, agents }
+  return { env, asked, session, toasts, runs, stdin, lemonade, agents, spawns }
 }
 
 async function start($: Engine) {
@@ -824,6 +849,80 @@ describe('model list nesting', () => {
     await ui.input({ key: 'search', text: 'phi-3', kind: 'change' })
     expect(await ui.find({ key: 'get-Phi-3-mini-GGUF' })).toBeDefined()
     expect(await ui.find({ key: 'get-Phi-4-mini-instruct-GGUF' })).toBeUndefined()
+  })
+})
+
+describe('Omni bundles', () => {
+  const bundle = { id: 'LMX-Omni-Mini', size: 3, downloaded: true, suggested: true, recipe: 'collection.omni', labels: ['chat'] }
+  const image = { id: 'SD-Turbo-GGUF', size: 5, downloaded: true, suggested: true, recipe: 'sd-cpp', labels: ['image'] }
+
+  test("a bundle's requests go through the Omni proxy, started once for the session", async ($, on) => {
+    const { asked, env, spawns, toasts, lemonade: server } = world(on, { LEMONCLAUDE_MEDIA_DIR: 'C:/media' })
+    server.models.push(bundle)
+    await start($)
+    const { text } = await lemonade($, 'on LMX-Omni-Mini')
+    expect(text).toContain('Requests now go to 🍋 LMX-Omni-Mini')
+    expect(env.get('ANTHROPIC_BASE_URL')).toBe('http://127.0.0.1:4567')
+    await step($)
+    expect(asked).toEqual(['LMX-Omni-Mini @ http://127.0.0.1:4567'])
+    expect(spawns[0]).toEqual(['node', expect.stringMatching(/proxy[\\/]omni-proxy\.mjs$/), '--lemonade', 'http://127.0.0.1:13305', '--media', 'C:/media'])
+    // Back to a single model: straight to Lemonade again.
+    await lemonade($, 'on gemma')
+    await step($)
+    expect(asked.at(-1)).toBe('Gemma-Chat-GGUF @ http://127.0.0.1:13305')
+    expect(toasts.some(t => t.includes('Node'))).toBe(false)
+  })
+
+  test('without Node, a bundle says what it needs and stays off', async ($, on) => {
+    const { asked, lemonade: server } = world(on, {}, { noNode: true })
+    server.models.push(bundle)
+    await start($)
+    expect((await lemonade($, 'on LMX-Omni-Mini')).text).toContain('Omni bundles run through a small proxy on Node.js')
+    await step($)
+    expect(asked).toEqual(['claude-opus-5-5 @ default'])
+  })
+
+  test('/lemonade bundle makes one of downloaded models, a chat model among them', async ($, on) => {
+    const { lemonade: server } = world(on)
+    server.models.push(image)
+    await start($)
+    const { text } = await lemonade($, 'bundle MyKit Gemma-Chat-GGUF SD-Turbo')
+    expect(server.bundles).toEqual([{ model_name: 'user.MyKit', recipe: 'collection.omni', components: ['Gemma-Chat-GGUF', 'SD-Turbo-GGUF'] }])
+    expect(text).toContain('Made the Omni bundle user.MyKit: Gemma-Chat-GGUF (chat), SD-Turbo-GGUF (image).')
+    // Loaded as a bundle: no window to claim, and tool support read from its chat model.
+    server.bundles[0]!.components = ['Qwen3.5-4B-GGUF', 'SD-Turbo-GGUF']
+    server.models.find(m => m.id === 'user.MyKit')!.labels = []
+    ;(server.models.find(m => m.id === 'user.MyKit') as Record<string, unknown>).components = ['Qwen3.5-4B-GGUF', 'SD-Turbo-GGUF']
+    server.loaded = []
+    const used = await lemonade($, 'on user.MyKit')
+    expect(used.text).toContain('Loaded the Omni bundle user.MyKit.')
+    expect(used.text).not.toContain('window')
+    expect(used.text).not.toContain('tool-calling')
+    // It's in the list, tagged.
+    const ui = await manager($, 'desktop')
+    expect((await ui.find({ key: 'row-user.MyKit' }))?.text).toContain('bundle')
+  })
+
+  test('/lemonade bundle refuses models not downloaded, and a bundle with no chat model', async ($, on) => {
+    const { lemonade: server } = world(on)
+    server.models.push(image)
+    await start($)
+    expect((await lemonade($, 'bundle Kit Not-Pulled-GGUF SD-Turbo-GGUF')).text).toContain("Not-Pulled-GGUF isn't downloaded")
+    expect((await lemonade($, 'bundle Kit SD-Turbo-GGUF Whisper')).text).toContain('A bundle needs a chat model')
+    expect((await lemonade($, 'bundle Kit')).text).toContain('Name the bundle and two or more downloaded models')
+    expect(server.bundles).toEqual([])
+  })
+
+  test('/lemonade unbundle removes a bundle, not while requests go to it', async ($, on) => {
+    const { lemonade: server } = world(on)
+    server.models.push(image)
+    await start($)
+    await lemonade($, 'bundle MyKit Gemma-Chat-GGUF SD-Turbo-GGUF')
+    await lemonade($, 'on user.MyKit')
+    expect((await lemonade($, 'unbundle MyKit')).text).toContain('Run /lemonade off first')
+    await lemonade($, 'off')
+    expect((await lemonade($, 'unbundle MyKit')).text).toBe('Removed the bundle user.MyKit. Its models stay downloaded.')
+    expect(server.deleted).toEqual(['user.MyKit'])
   })
 })
 

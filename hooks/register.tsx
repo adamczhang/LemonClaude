@@ -57,7 +57,7 @@ async function baseUrl($: $): Promise<string> {
 type Answer = { ok: boolean; status: number; text: string }
 
 /**
- * A request to Lemonade. Claude Code refuses a plugin's own requests while
+ * A request to Lemonade. Some Claude Code versions (2.1.287) refuse a plugin's own requests while
  * CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set (people set it for privacy, and `lemonade launch
  * claude` does), so a refused one goes out through curl instead: Lemonade is this mod's essential traffic.
  * Rejects when Lemonade can't be reached either way.
@@ -415,7 +415,14 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
     }
   }
   if (!answer.ok) {
-    return { ok: false, message: `Lemonade couldn't load ${model}: ${errorOf(answer.text) ?? `it answered ${answer.status}`}` }
+    const why = errorOf(answer.text) ?? `it answered ${answer.status}`
+    // Another Lemonade server, or any other program, can hold the GPU memory this load needed: Lemonade
+    // can't see it, so the load fails rather than getting a clean conflict.
+    const isMemory = /out of memory|\boom\b|failed to allocate|cudaMalloc|insufficient memory|not enough memory|ErrorOutOfDeviceMemory/i.test(why)
+    const hint = isMemory
+      ? ` Not enough GPU memory: another app may be using it. Free some, lower LEMONCLAUDE_CTX_SIZE (now ${ctx}), or pick a smaller model.`
+      : ''
+    return { ok: false, message: `Lemonade couldn't load ${model}: ${why}${hint}` }
   }
 
   await remember($, model, true)

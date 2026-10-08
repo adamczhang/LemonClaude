@@ -35,6 +35,8 @@ type Lemonade = {
   pullGate?: Promise<void>
   /** Lemonade refuses each pull with this error. */
   pullError?: string
+  /** Lemonade fails each load with this error. */
+  loadError?: string
   /** Each request that went out through curl, as `METHOD /path`. */
   curled: string[]
   /** What Lemonade has in memory: one chat slot, as max_loaded_models 1 gives. */
@@ -128,6 +130,7 @@ function world(
     } else if (path === '/api/v1/load' && method === 'POST') {
       const load = JSON.parse(sent ?? '{}') as { model_name: string; ctx_size?: number; pinned?: boolean }
       lemonade.loads.push(load)
+      if (lemonade.loadError) return { status: 500, text: JSON.stringify({ error: { message: lemonade.loadError } }) }
       const known = lemonade.models.find(m => m.id === load.model_name)
       if (!known) return { status: 404, text: JSON.stringify({ error: { message: `model '${load.model_name}' not found` } }) }
       const loaded = { model_name: load.model_name, type: 'llm', pinned: load.pinned === true, recipe_options: { ctx_size: load.ctx_size ?? 262144 } }
@@ -828,6 +831,28 @@ describe('sharing Lemonade', () => {
     session.model = 'claude-opus-5-5'
     await step($)
     expect(server.pins).toEqual([])
+  })
+
+  test('a load that runs out of GPU memory says so, and how to make room', async ($, on) => {
+    const { asked, lemonade: server } = world(on)
+    server.loaded = []
+    server.loadError = 'llama-server failed to start: CUDA error: out of memory'
+    await start($)
+    const { text } = await lemonade($, 'on gemma')
+    expect(text).toBe(
+      "Lemonade couldn't load Gemma-Chat-GGUF: llama-server failed to start: CUDA error: out of memory " +
+        'Not enough GPU memory: another app may be using it. Free some, lower LEMONCLAUDE_CTX_SIZE (now 65536), or pick a smaller model.',
+    )
+    await step($)
+    expect(asked).toEqual(['claude-opus-5-5 @ default'])
+  })
+
+  test('any other load failure is passed on as Lemonade says it', async ($, on) => {
+    const { lemonade: server } = world(on)
+    server.loaded = []
+    server.loadError = 'backend llamacpp:cuda is not installed'
+    await start($)
+    expect((await lemonade($, 'on gemma')).text).toBe("Lemonade couldn't load Gemma-Chat-GGUF: backend llamacpp:cuda is not installed")
   })
 
   test('/lemonade on says the conflict and stays off', async ($, on) => {

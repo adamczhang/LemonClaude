@@ -23,7 +23,8 @@ This release brings LemonClaude to the Claude Code desktop app and lets you mana
   - Subagents of another plugin's agent type are passed through untouched.
   - The model manager marks models another app has pinned.
   - `/lemonade on` loads before switching, says "Loaded … with a 64K window" or exactly why not, and doesn't switch to a model that can't load.
-- Support for `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. With it set, Claude Code refuses a mod's own network requests, so LemonClaude reaches Lemonade through `curl` instead.
+- Support for `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. With it set, some Claude Code versions (2.1.287) refuse a mod's own network requests, and LemonClaude reaches Lemonade through `curl` instead.
+- A load that fails for lack of GPU memory says so, and suggests freeing some, a smaller window or a smaller model. Another program, such as a second Lemonade server, can hold memory this server can't see.
 
 ### Changed
 

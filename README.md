@@ -136,7 +136,7 @@ If Lemonade still doesn't answer, a toast says so and suggests picking a Claude 
 
 ### Privacy
 
-While requests go to Lemonade, your prompts and code go to the server at `LEMONADE_BASE_URL`, by default on your own machine. Claude Code's own telemetry and update checks still follow your settings. Set `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` to turn them off. LemonClaude works with that flag set: Claude Code then refuses a mod's own network requests, so LemonClaude reaches Lemonade through `curl` instead.
+While requests go to Lemonade, your prompts and code go to the server at `LEMONADE_BASE_URL`, by default on your own machine. Claude Code's own telemetry and update checks still follow your settings. Set `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` to turn them off. LemonClaude works with that flag set. Some Claude Code versions (2.1.287) then refuse a mod's own network requests, and LemonClaude reaches Lemonade through `curl` instead.
 
 ## Sharing Lemonade with other apps
 
@@ -149,6 +149,8 @@ LemonClaude shares Lemonade Server with whatever else uses it, such as the Lemon
 - **It leaves other mods' agents alone.** A subagent of another plugin's agent type, one named like `other:worker`, is that plugin's to answer. LemonClaude passes its requests through untouched.
 
 To run two chat models at once, raise `max_loaded_models` in Lemonade's settings. That's your call, so LemonClaude never changes it.
+
+Another program, such as a second Lemonade server, can also hold GPU memory that this server can't see. Then a load fails instead of getting a clean conflict. LemonClaude says so: "Not enough GPU memory: another app may be using it." It suggests freeing some, lowering `LEMONCLAUDE_CTX_SIZE`, or picking a smaller model.
 
 ## How it works
 
@@ -186,6 +188,7 @@ To run two chat models at once, raise `max_loaded_models` in Lemonade's settings
 | "Lemonade Server didn't answer … within 60 s of starting" | Start Lemonade Server from the Start menu and check it runs. Its tray icon opens the logs |
 | The first reply is slow | Loading a model takes a few seconds, and its first answer can take 20 seconds or more. `/lemonade on` loads before you ask anything |
 | "Another app has pinned Lemonade's chat models (…)" | Another app holds Lemonade's chat slot. Unload its model there, raise `max_loaded_models` in Lemonade's settings, or pick a Claude model |
+| "Not enough GPU memory" | Another program holds GPU memory. Free some, lower `LEMONCLAUDE_CTX_SIZE`, or pick a smaller model |
 | "… isn't downloaded" | Download the model from `/lemonade` first. LemonClaude never downloads a model just by loading it |
 | Tools fail or the model ignores them | Pick a model labeled `tool-calling` (the model manager shows `tools`) |
 | Requests still go to Lemonade after removing the mod | Start a new session, or unset `ANTHROPIC_BASE_URL` in that shell |

@@ -16,6 +16,13 @@ This release brings LemonClaude to the Claude Code desktop app and lets you mana
 - `/lemonade on [model]`, which sends every request to the offered Lemonade model whatever the model selector shows. `/lemonade off`, or picking another model in a picker, hands routing back. This is how to use Lemonade from the desktop app. Ending the session turns it off.
 - Starting Lemonade Server on Windows when a request needs it and it isn't running, then waiting up to 60 seconds for it. `/lemonade`, `/lemonade on` and `/lemonade <model>` start it too. The server is started detached, so it keeps running after the session. Set `LEMONCLAUDE_AUTOSTART=0` to turn this off.
 - The selector entry says "starts when picked" while Lemonade is down and LemonClaude can start it.
+- Good-neighbour behavior on a Lemonade server shared with other apps:
+  - Models are loaded explicitly with a bounded window, `LEMONCLAUDE_CTX_SIZE`, 64K by default, never by Lemonade's auto-load at its largest window. A model that isn't downloaded is never loaded, since that would download it.
+  - The model in use is pinned, and unpinned on `/lemonade off`, on picking another model, and at session end. LemonClaude only unpins models it pinned, remembered across sessions. A pin a crashed session left is released after an hour.
+  - When another app has pinned Lemonade's chat models, one toast names them. When a load made Lemonade unload another app's model, it says so.
+  - Subagents of another plugin's agent type are passed through untouched.
+  - The model manager marks models another app has pinned.
+  - `/lemonade on` loads before switching, says "Loaded … with a 64K window" or exactly why not, and doesn't switch to a model that can't load.
 - Support for `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. With it set, Claude Code refuses a mod's own network requests, so LemonClaude reaches Lemonade through `curl` instead.
 
 ### Changed
@@ -25,6 +32,11 @@ This release brings LemonClaude to the Claude Code desktop app and lets you mana
 - A downloaded model counts as a chat model unless a label says otherwise, so a model pulled without labels can be used.
 - Sizes read as Lemonade shows them (`650 MB`, `2.10 GB`). The selector entry no longer says whether a model is loaded, since that goes stale.
 - When Lemonade is down, `/lemonade list` says so in one line and says how to start it.
+
+### Fixed
+
+- A conflict with another app's pinned model no longer shows as "Lemonade didn't answer". Lemonade itself answers such a chat request with a misleading "model not found".
+- Lemonade no longer loads LemonClaude's model with its largest window (262K tokens), which took several gigabytes more GPU memory than needed.
 
 ## [0.1.0] - 2026-10-07
 

@@ -29,13 +29,14 @@ LemonClaude fills that gap. Pick 🍋 and the next request goes to the model on 
 - **A model manager inside Claude Code.** `/lemonade` lists every chat model Lemonade offers, laid out like Lemonade's own model manager. It shows what's loaded, what's downloaded and ready, and what you can download, with search and live download progress.
 - **Works in the desktop app.** The desktop app's picker lists only Claude models, so `/lemonade on` and the model manager's **Use** button switch there instead.
 - **Starts Lemonade for you.** On Windows, if Lemonade Server isn't running when a request needs it, LemonClaude starts it.
+- **A good neighbour.** It loads its model with a bounded window and pins it while in use. It never touches another app's models, and when another app holds Lemonade's chat slot it says exactly which one. See [Sharing Lemonade with other apps](#sharing-lemonade-with-other-apps).
 - **Leaves nothing behind.** Going back to Claude, or ending the session, restores Claude Code's settings exactly as they were.
 
 ## Quick start
 
 1. Install [Lemonade](https://github.com/lemonade-sdk/lemonade) and download a chat model that supports tool calling, such as `Qwen3.5-4B-GGUF`.
 2. Load LemonClaude into Claude Code (see [Install](#install)).
-3. In a new session, type `/lemonade` and press **Use** on a model. The status line shows `🍋 <model> (Lemonade)`.
+3. In a new session, type `/lemonade` and press **Use** on a model. LemonClaude loads it (a toast says "Loaded … with a 64K window"), and the status line shows `🍋 <model> (Lemonade)`.
 4. To go back, press **Back to Claude**, type `/lemonade off`, or pick a Claude model.
 
 ## Requirements
@@ -130,18 +131,32 @@ If Lemonade still doesn't answer, a toast says so and suggests picking a Claude 
 | `LEMONADE_BASE_URL` | `http://127.0.0.1:13305` | Where Lemonade Server listens |
 | `LEMONCLAUDE_LEMONADE_MODEL` | `Qwen3.5-4B-GGUF` | The model to offer while Lemonade is down and no earlier choice is remembered |
 | `LEMONCLAUDE_AUTOSTART` | on | Set to `0` so LemonClaude never starts Lemonade Server |
+| `LEMONCLAUDE_CTX_SIZE` | `65536` | The context window LemonClaude loads models with, in tokens (at least 4096). 64K holds Claude Code's own prompt and tools, about 20–30K tokens, plus a conversation |
 | `ANTHROPIC_CUSTOM_MODEL_OPTION` | none | If you've set this yourself for something other than Lemonade, LemonClaude leaves your entry alone |
 
 ### Privacy
 
 While requests go to Lemonade, your prompts and code go to the server at `LEMONADE_BASE_URL`, by default on your own machine. Claude Code's own telemetry and update checks still follow your settings. Set `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` to turn them off. LemonClaude works with that flag set: Claude Code then refuses a mod's own network requests, so LemonClaude reaches Lemonade through `curl` instead.
 
+## Sharing Lemonade with other apps
+
+LemonClaude shares Lemonade Server with whatever else uses it, such as the Lemonade app, other Claude Code sessions or other mods. Lemonade is the one scheduler for your GPU, so LemonClaude follows a few rules to stay out of other apps' way:
+
+- **It loads explicitly, with a bounded window.** Left to itself, Lemonade loads a model the moment a request names it, with its largest window. That can be 262K tokens, several gigabytes more than needed. LemonClaude loads its model first, with a 64K window (`LEMONCLAUDE_CTX_SIZE`). It only loads models already downloaded, because loading one that isn't would start a download.
+- **It pins its model while in use, and unpins it when done.** A pinned model can't be evicted by another app's load. LemonClaude gives the pin back on `/lemonade off`, when you pick a Claude model or another Lemonade model, and when the session ends. The model stays loaded, warm for whoever needs it next.
+- **It never touches what isn't its own.** LemonClaude remembers which models it pinned, and only ever unpins those. It never unloads a model and never changes Lemonade's settings. If a session crashes, the next one releases any pin it left after an hour unused.
+- **It says exactly what happened.** If another app has pinned Lemonade's chat models, LemonClaude names them once: "Another app has pinned Lemonade's chat models (X), so Y can't load." It suggests unloading them in that app, raising Lemonade's `max_loaded_models`, or picking a Claude model. If loading made Lemonade unload another app's unpinned model, it says that too: "Lemonade unloaded X to make room."
+- **It leaves other mods' agents alone.** A subagent of another plugin's agent type, one named like `other:worker`, is that plugin's to answer. LemonClaude passes its requests through untouched.
+
+To run two chat models at once, raise `max_loaded_models` in Lemonade's settings. That's your call, so LemonClaude never changes it.
+
 ## How it works
 
 - **The selector entry** comes from Claude Code's `ANTHROPIC_CUSTOM_MODEL_OPTION`, `_NAME` and `_DESCRIPTION` variables, which LemonClaude sets when the session starts.
 - **Routing** happens in a `turn.step` hook that runs before every model request, main loop and subagents alike.
-  - **A Lemonade model selected**, or `/lemonade on` holding: the hook saves `ANTHROPIC_BASE_URL`, points it at Lemonade, and names the Lemonade model on the request. Claude Code reads that variable on every request, so the next one goes to Lemonade.
-  - **A Claude model selected:** the hook restores the saved value.
+  - **A Lemonade model selected**, or `/lemonade on` holding: the hook makes sure the model is loaded and pinned (`/api/v1/load` with `ctx_size` and `pinned`, or `/internal/pin` when it's already loaded). Then it saves `ANTHROPIC_BASE_URL`, points it at Lemonade, and names the Lemonade model on the request. Claude Code reads that variable on every request, so the next one goes to Lemonade.
+  - **A Claude model selected:** the hook restores the saved value and unpins the model it pinned.
+  - **Another plugin's subagent:** the hook passes the request through untouched.
 - **`/lemonade on`** records the model the session had when you typed it. When the session's model changes from that one, because you picked something in a picker, `/lemonade on` ends.
 - **Model aliases:** unlike `lemonade launch claude`, LemonClaude leaves the `ANTHROPIC_DEFAULT_*_MODEL` aliases alone. Pointing them at Lemonade would make picking Opus resolve to the Lemonade model.
 - **Starting Lemonade:** before each request to Lemonade, the hook checks the server's `/api/v1/health`. If the server doesn't answer, the hook runs `LemonadeServer.exe --silent` from `%LOCALAPPDATA%\lemonade_server\bin` through PowerShell's `Start-Process`. That detaches the server from Claude Code, so it outlives the session. LemonClaude only does this when `LEMONADE_BASE_URL` points at this machine. Requests that find the server down at the same time share one start.
@@ -157,7 +172,7 @@ While requests go to Lemonade, your prompts and code go to the server at `LEMONA
 - **Starting Lemonade:** only on Windows, and only with Lemonade Server installed by its Windows installer in `%LOCALAPPDATA%\lemonade_server`. LemonClaude never stops the server it starts.
 - **Download size:** the model manager shows each model's size but doesn't check free disk space. If a download fails, Lemonade's reason shows in the row.
 - **API keys:** a Lemonade server that requires `LEMONADE_API_KEY` isn't supported yet.
-- **Context window:** Claude Code budgets context as if it were talking to Claude. The real limit is the `ctx_size` Lemonade sets for the model.
+- **Context window:** Claude Code budgets context as if it were talking to Claude. The real limit is the window LemonClaude loads the model with, 64K by default (`LEMONCLAUDE_CTX_SIZE`). If another app already loaded the model with a different window, LemonClaude uses it as loaded rather than reload it.
 - **Background calls:** Claude Code may print an `unrecognized_model` notice. Its background calls (session titles and similar) ask for Claude models, and Lemonade answers them with a 404 while requests go to Lemonade.
 - **Model quality:** small local models follow Claude Code's tool protocol less reliably than Claude does. Models without the `tool-calling` label may fail to use tools at all.
 
@@ -169,7 +184,9 @@ While requests go to Lemonade, your prompts and code go to the server at `LEMONA
 | No 🍋 entry in the selector | In the desktop app that's expected: use `/lemonade on`. In the terminal, run `/lemonade list` to see what's offered |
 | "Lemonade didn't answer" toast | Start Lemonade Server, or check `LEMONADE_BASE_URL` |
 | "Lemonade Server didn't answer … within 60 s of starting" | Start Lemonade Server from the Start menu and check it runs. Its tray icon opens the logs |
-| The first reply is slow | Lemonade loads the model on its first request, which can take 20 seconds or more |
+| The first reply is slow | Loading a model takes a few seconds, and its first answer can take 20 seconds or more. `/lemonade on` loads before you ask anything |
+| "Another app has pinned Lemonade's chat models (…)" | Another app holds Lemonade's chat slot. Unload its model there, raise `max_loaded_models` in Lemonade's settings, or pick a Claude model |
+| "… isn't downloaded" | Download the model from `/lemonade` first. LemonClaude never downloads a model just by loading it |
 | Tools fail or the model ignores them | Pick a model labeled `tool-calling` (the model manager shows `tools`) |
 | Requests still go to Lemonade after removing the mod | Start a new session, or unset `ANTHROPIC_BASE_URL` in that shell |
 
@@ -186,6 +203,10 @@ claude plugin test /path/to/LemonClaude
 The code is in `hooks/register.tsx`, its state contract in `types/index.d.ts`, and its tests in `tests/lemonade.test.ts`. The tests run against a fake Lemonade, so they need no server, and they draw the model manager on both the terminal and desktop surfaces. The mod API is early access, so re-run `validate` and `test` after each Claude Code update.
 
 Don't develop LemonClaude in a session that has it loaded. A bug in its `turn.step` hook would break that session's own requests. Test changes with `claude plugin test`, and live with `claude -p --plugin-dir` under a temporary `CLAUDE_CONFIG_DIR`.
+
+## Future work
+
+- **An embedded Lemonade per project**, as an opt-in. Two Lemonade servers on one GPU would each assume the whole card is free, so this only makes sense with each server given its own GPU.
 
 ## License
 

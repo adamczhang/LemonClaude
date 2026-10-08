@@ -6,6 +6,11 @@ import type { DownloadState, LemonadeModel, SavedEnv } from '../types'
 const DEFAULT_BASE_URL = 'http://127.0.0.1:13305'
 const DEFAULT_MODEL = 'Qwen3.5-4B-GGUF'
 const START_TIMEOUT_S = 60
+const DEFAULT_CTX_SIZE = 65536
+const MIN_CTX_SIZE = 4096
+// A pin LemonClaude holds that no request has used for this long belongs to a session that ended
+// without saying so (a crash), and is given back.
+const STALE_PIN_MS = 60 * 60 * 1000
 
 const offered = atom({ plugin: 'lemonclaude', key: 'offered' } as const, null as string | null)
 const routed = atom({ plugin: 'lemonclaude', key: 'routed' } as const, null as string | null)
@@ -107,12 +112,12 @@ export async function listCatalog($: $, base: string): Promise<LemonadeModel[]> 
     suggested?: boolean
   }>
 
-  const [health, system] = await Promise.all([
-    askLemonade($, `${base}/api/v1/health`).catch(() => undefined),
+  const [now, system, held] = await Promise.all([
+    loadedNow($, base),
     askLemonade($, `${base}/api/v1/system-info`).catch(() => undefined),
+    ours($),
   ])
-  const all = (health?.ok ? parsed(health.text)?.all_models_loaded : undefined) as Array<{ model_name: string }> | undefined
-  const loaded = new Set((all ?? []).map(m => m.model_name))
+  const loaded = new Map((now ?? []).map(m => [m.model_name, m]))
   // Recipes this machine can't run on any backend, as Lemonade judges it: their models are no use here.
   let cannot = new Set<string>()
   const recipes = (system?.ok ? parsed(system.text)?.recipes : undefined) as
@@ -141,6 +146,7 @@ export async function listCatalog($: $, base: string): Promise<LemonadeModel[]> 
       isDownloaded: m.downloaded !== false,
       hasTools: (m.labels ?? []).includes('tool-calling'),
       isLoaded: loaded.has(m.id),
+      ...(loaded.get(m.id)?.pinned ? { pin: m.id in held ? ('mine' as const) : ('theirs' as const) } : {}),
     }))
     .sort((a, b) => a.id.localeCompare(b.id, undefined, { sensitivity: 'base' }))
 }
@@ -242,18 +248,18 @@ function formatSize(gb?: number): string {
 }
 
 function tags(m: LemonadeModel): string {
-  return [m.hasTools ? 'tools' : '', ...['vision', 'reasoning', 'coding'].filter(l => m.labels.includes(l))].filter(Boolean).join(' · ')
+  const pin = m.pin === 'theirs' ? 'pinned by another app' : m.pin === 'mine' ? 'pinned' : ''
+  return [m.hasTools ? 'tools' : '', ...['vision', 'reasoning', 'coding'].filter(l => m.labels.includes(l)), pin]
+    .filter(Boolean)
+    .join(' · ')
 }
 
-/** The message in a Lemonade error body (`{ error }` or `{ message }`), if it has one. */
-function pullError(text: string): string | undefined {
-  try {
-    const body = JSON.parse(text) as { error?: unknown; message?: unknown }
-    const said = body.error ?? body.message
-    return typeof said === 'string' ? said : undefined
-  } catch {
-    return undefined
-  }
+/** The message in a Lemonade error body (`{ error }`, `{ error: { message } }` or `{ message }`), if it has one. */
+function errorOf(text: string): string | undefined {
+  const body = parsed(text) as { error?: unknown; message?: unknown } | undefined
+  const error = body?.error as { message?: unknown } | string | undefined
+  const said = typeof error === 'object' && error !== null ? error.message : (error ?? body?.message)
+  return typeof said === 'string' ? said : undefined
 }
 
 /** Starts a server-owned download of `id`, which Lemonade keeps going whatever happens to this session. */
@@ -266,7 +272,7 @@ async function download($: $, id: string): Promise<void> {
     body: JSON.stringify({ model_name: id, stream: true, subscribe: false }),
   }).catch((err: unknown): Answer => ({ ok: false, status: 0, text: unreachable(base, err) }))
   if (!started.ok) {
-    const error = pullError(started.text) ?? (started.status ? `Lemonade answered ${started.status}` : started.text)
+    const error = errorOf(started.text) ?? (started.status ? `Lemonade answered ${started.status}` : started.text)
     await update($, downloads, d => ({ ...d, [id]: { percent: 0, status: 'error', error } }))
     return
   }
@@ -274,10 +280,164 @@ async function download($: $, id: string): Promise<void> {
   watchDownloads($)
 }
 
+/** A model Lemonade has in memory, as /api/v1/health lists it. */
+type Loaded = { model_name: string; pinned?: boolean; type?: string }
+
+/** What Lemonade has loaded now, or null when it doesn't answer. */
+async function loadedNow($: $, base: string): Promise<Loaded[] | null> {
+  const health = await askLemonade($, `${base}/api/v1/health`).catch(() => undefined)
+  if (!health?.ok) return null
+  const all = parsed(health.text)?.all_models_loaded
+  return Array.isArray(all) ? (all as Loaded[]) : []
+}
+
 async function answers($: $, base: string): Promise<boolean> {
-  return askLemonade($, `${base}/api/v1/health`)
-    .then(r => r.ok)
-    .catch(() => false)
+  return (await loadedNow($, base)) !== null
+}
+
+/** The context window LemonClaude loads models with: LEMONCLAUDE_CTX_SIZE (at least 4096), else 64K. */
+async function ctxSize($: $): Promise<number> {
+  const said = Number(await $.env.get('LEMONCLAUDE_CTX_SIZE'))
+  return Number.isInteger(said) && said > 0 ? Math.max(MIN_CTX_SIZE, said) : DEFAULT_CTX_SIZE
+}
+
+function windowName(ctx: number): string {
+  return ctx % 1024 === 0 ? `${ctx / 1024}K` : `${ctx}-token`
+}
+
+/**
+ * The models LemonClaude pinned, with when a request last used each. Only these are ever unpinned:
+ * a pin another app holds is that app's. In the store, so a restarted session still knows them.
+ */
+async function ours($: $): Promise<Record<string, number>> {
+  const held = await $.store.get('pinned')
+  return held && typeof held === 'object' ? { ...(held as Record<string, number>) } : {}
+}
+
+async function remember($: $, model: string, isPinned: boolean): Promise<void> {
+  const held = await ours($)
+  if (isPinned) held[model] = Date.now()
+  else delete held[model]
+  await $.store.set('pinned', held)
+}
+
+async function setPin($: $, base: string, model: string, pinned: boolean): Promise<boolean> {
+  const answer = await askLemonade($, `${base}/internal/pin`, {
+    method: 'POST',
+    body: JSON.stringify({ model_name: model, pinned }),
+  }).catch(() => undefined)
+  return answer?.ok === true
+}
+
+/** Unpins `model` if LemonClaude pinned it. It stays loaded, warm for whoever wants it next. */
+async function release($: $, model: string): Promise<void> {
+  if (!(model in (await ours($)))) return
+  await setPin($, await baseUrl($), model, false)
+  await remember($, model, false)
+}
+
+/** How loading a model for requests went: ready or not, and what to tell the person. */
+type LoadOutcome = { ok: boolean; message?: string }
+
+// One load per model at a time: a main step and its subagents' steps arrive together.
+const loading = new Map<string, Promise<LoadOutcome>>()
+
+/**
+ * Makes `model` ready for requests, the way an app sharing Lemonade should: loads it explicitly with
+ * a bounded window and pinned, or pins it when it is already loaded, so other apps' loads can't evict
+ * it. Lemonade's own auto-load would take the largest window and evict others without a word.
+ */
+function ensureLoaded($: $, model: string): Promise<LoadOutcome> {
+  let pending = loading.get(model)
+  if (!pending) {
+    pending = loadModel($, model).finally(() => loading.delete(model))
+    loading.set(model, pending)
+  }
+  return pending
+}
+
+function isSlotsPinned(answer: Answer): boolean {
+  return answer.status === 409 && (parsed(answer.text)?.error as { code?: unknown } | undefined)?.code === 'slots_pinned_error'
+}
+
+async function loadModel($: $, model: string): Promise<LoadOutcome> {
+  const base = await baseUrl($)
+  const before = await loadedNow($, base)
+  // Not answering: ensureServer has said why, or the request's failure will.
+  if (before === null) return { ok: false }
+  const mineBefore = await ours($)
+
+  const here = before.find(m => m.model_name === model)
+  if (here) {
+    // Loaded already: pin it, never load it again, which would reload it with another window.
+    if (!here.pinned && (await setPin($, base, model, true))) await remember($, model, true)
+    else if (model in mineBefore && Date.now() - mineBefore[model]! > 60_000) await remember($, model, true)
+    return { ok: true }
+  }
+
+  // Loading a model Lemonade hasn't downloaded would download it, gigabytes: never do that unasked.
+  if (!(await read($, catalog)).some(m => m.id === model)) await refresh($)
+  const known = (await read($, catalog)).find(m => m.id === model)
+  if (!known) return { ok: false, message: `Lemonade lists no model named ${model}.` }
+  if (!known.isDownloaded) return { ok: false, message: `${model} isn't downloaded. Download it from /lemonade first.` }
+
+  const ctx = await ctxSize($)
+  const load = () =>
+    askLemonade($, `${base}/api/v1/load`, {
+      method: 'POST',
+      body: JSON.stringify({ model_name: model, ctx_size: ctx, pinned: true }),
+    }).catch((err: unknown): Answer => ({ ok: false, status: 0, text: JSON.stringify({ error: unreachable(base, err) }) }))
+  let answer = await load()
+  if (isSlotsPinned(answer)) {
+    // LemonClaude's own pin on the model it is leaving can hold the slot: give it back, and try again.
+    const leaving = before.filter(m => m.pinned && m.model_name !== model && m.model_name in mineBefore)
+    if (leaving.length > 0) {
+      for (const m of leaving) await release($, m.model_name)
+      answer = await load()
+    }
+  }
+  if (isSlotsPinned(answer)) {
+    const held = await ours($)
+    const pinned = ((await loadedNow($, base)) ?? before).filter(m => m.pinned && !(m.model_name in held)).map(m => m.model_name)
+    return {
+      ok: false,
+      message:
+        `Another app has pinned Lemonade's chat models (${pinned.join(', ') || 'unnamed'}), so ${model} can't load. ` +
+        `Unload them in that app, raise Lemonade's max_loaded_models, or pick a Claude model.`,
+    }
+  }
+  if (!answer.ok) {
+    return { ok: false, message: `Lemonade couldn't load ${model}: ${errorOf(answer.text) ?? `it answered ${answer.status}`}` }
+  }
+
+  await remember($, model, true)
+  const after = (await loadedNow($, base)) ?? []
+  // Another app's model that made room: unpinned, not LemonClaude's, and gone now.
+  const gone = before
+    .filter(m => !m.pinned && !(m.model_name in mineBefore) && !after.some(a => a.model_name === m.model_name))
+    .map(m => m.model_name)
+  await refresh($)
+  const room = gone.length > 0 ? ` Lemonade unloaded ${gone.join(', ')} to make room.` : ''
+  return { ok: true, message: `Loaded ${model} with a ${windowName(ctx)} window.${room}` }
+}
+
+// The last toast and when: requests that arrive together (a step and its subagents') say a thing once.
+let lastSaid = { text: '', at: 0 }
+
+function say($: $, text: string): void {
+  const now = Date.now()
+  if (text === lastSaid.text && now - lastSaid.at < 10_000) return
+  lastSaid = { text, at: now }
+  $.ui.toast(text)
+}
+
+/**
+ * True for a subagent of another plugin's agent type (`other:worker`): that plugin answers its steps
+ * itself, perhaps from a local model of its own, so LemonClaude leaves them untouched.
+ */
+async function isOthersAgent($: $, agentId: string): Promise<boolean> {
+  const agent = (await $.agent.list()).find(a => a.id === agentId)
+  return agent !== undefined && agent.type.includes(':') && !agent.type.startsWith('lemonclaude:')
 }
 
 /**
@@ -400,7 +560,8 @@ async function applyEnv($: $, env: SavedEnv): Promise<void> {
 
 /** Sends requests to Lemonade's `model`, or back to Claude for null; a no-op when already so. */
 export async function route($: $, model: string | null): Promise<void> {
-  if ((await read($, routed)) === model) return
+  const was = await read($, routed)
+  if (was === model) return
   if (model) {
     // Keep the environment from before the first switch, so switching between Lemonade models still restores Claude's.
     if ((await read($, saved)) === null) {
@@ -415,6 +576,8 @@ export async function route($: $, model: string | null): Promise<void> {
   }
   await update($, routed, () => model)
   $.ui.status(model ? `🍋 ${model} (Lemonade)` : undefined)
+  // Requests left that model: give back its pin, if LemonClaude held it, so other apps can use the slot.
+  if (was) await release($, was)
 }
 
 /**
@@ -448,9 +611,7 @@ async function offerQuery($: $, query: string): Promise<LemonadeModel | string> 
 }
 
 function caveats(m: LemonadeModel): string {
-  const load = m.isLoaded ? '' : ' It loads on its first request, which takes a few seconds.'
-  const warn = m.hasTools ? '' : ' Lemonade does not label it tool-calling, so Claude Code tools may fail.'
-  return `${load}${warn}`
+  return m.hasTools ? '' : ' Lemonade does not label it tool-calling, so Claude Code tools may fail.'
 }
 
 /** `/lemonade <model>`: makes the selector's Lemonade entry name that model. */
@@ -473,11 +634,14 @@ async function switchOn($: $, query: string): Promise<string> {
   if (typeof named === 'string') return named
   const id = await read($, offered)
   if (!id) return 'The model selector offers no Lemonade model. Name one: /lemonade on <model>.'
+  const loaded = await ensureLoaded($, id)
+  if (!loaded.ok && loaded.message) return loaded.message
   const sessionModel = await $.session.model()
   await update($, heldOver, () => sessionModel as string | null)
   await route($, id)
   const m = named ?? (await models($)).find(x => x.id === id)
-  return `Requests now go to 🍋 ${id} via Lemonade. /lemonade off, or picking another model, goes back.${m ? caveats(m) : ''}`
+  const how = `Requests now go to 🍋 ${id} via Lemonade. /lemonade off, or picking another model, goes back.`
+  return `${loaded.message ? `${loaded.message} ` : ''}${how}${m ? caveats(m) : ''}`
 }
 
 /** `/lemonade off`: requests follow the session's model again. */
@@ -515,6 +679,11 @@ export const register: Register = on => {
       name: 'lemonade',
       description: 'Use a local Lemonade model: /lemonade opens the model list; /lemonade on, off, <model>, list',
     })
+
+    // Pins a session left when it ended without a goodbye (a crash) would hold Lemonade's slots for good.
+    for (const [model, at] of Object.entries(await ours($))) {
+      if (Date.now() - at > STALE_PIN_MS && (await read($, routed)) !== model) await release($, model)
+    }
 
     // A hot reload keeps $.state: the offer and the routing still stand.
     if ((await read($, offered)) === null) {
@@ -563,14 +732,24 @@ export const register: Register = on => {
 
   // Every model request follows the session's model: main loop and subagents alike go to Lemonade while it is picked.
   on('turn.step', async function* ($, e, next) {
+    // Another plugin's agent is that plugin's to answer: no rename, no load, no routing change.
+    if (e.agentId && (await isOthersAgent($, e.agentId))) return yield* next(e)
     const model = await lemonadeModelOf($, await $.session.model())
-    // A failed start has said so already; the request goes on and fails as it would have.
-    const didStartFail = model ? await ensureServer($) : false
+    // A failed start or load has said exactly why already; the request goes on and fails as it would have.
+    let hasSaidWhy = false
+    if (model) {
+      hasSaidWhy = await ensureServer($)
+      if (!hasSaidWhy) {
+        const loaded = await ensureLoaded($, model)
+        if (loaded.message) say($, loaded.message)
+        hasSaidWhy = !loaded.ok && loaded.message !== undefined
+      }
+    }
     await route($, model)
     const result = yield* next(model ? { ...e, model } : e)
     // No response from Lemonade is most often a server that isn't running.
-    if (model && !didStartFail && result.stopReason === null && !next.signal.aborted) {
-      $.ui.toast(`Lemonade didn't answer at ${await baseUrl($)}. Start Lemonade Server, or pick a Claude model.`)
+    if (model && !hasSaidWhy && result.stopReason === null && !next.signal.aborted) {
+      say($, `Lemonade didn't answer at ${await baseUrl($)}. Start Lemonade Server, or pick a Claude model.`)
     }
     return result
   })

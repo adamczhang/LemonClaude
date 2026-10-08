@@ -12,6 +12,8 @@ export type LemonadeModel = {
   hasTools: boolean
   /** True while Lemonade has it loaded in memory. */
   isLoaded: boolean
+  /** Who pinned it, while it is loaded and pinned: LemonClaude (`mine`) or another app (`theirs`). */
+  pin?: 'mine' | 'theirs'
 }
 
 /** A model download Lemonade runs on the server, as `/api/v1/downloads` reports it. */

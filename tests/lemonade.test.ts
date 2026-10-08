@@ -13,7 +13,8 @@ const MODELS = [
   { id: 'ACE-Step-Music', size: 10.5, downloaded: false, suggested: true, recipe: 'acestep', labels: ['audio-generation'] },
   { id: 'FLM-Chat', size: 1, downloaded: false, suggested: true, recipe: 'flm', labels: ['chat'] },
 ]
-const HEALTH = { all_models_loaded: [{ model_name: 'Qwen3.5-4B-GGUF' }] }
+/** A model in Lemonade's memory, as /api/v1/health lists it. */
+type Loaded = { model_name: string; type: string; pinned: boolean; recipe_options: { ctx_size: number } }
 // What this machine can run, as /api/v1/system-info judges it: no NPU for FastFlowLM.
 const SYSTEM = {
   recipes: {
@@ -36,6 +37,12 @@ type Lemonade = {
   pullError?: string
   /** Each request that went out through curl, as `METHOD /path`. */
   curled: string[]
+  /** What Lemonade has in memory: one chat slot, as max_loaded_models 1 gives. */
+  loaded: Loaded[]
+  /** Each /api/v1/load body. */
+  loads: Array<{ model_name: string; ctx_size?: number; pinned?: boolean }>
+  /** Each /internal/pin body. */
+  pins: Array<{ model_name: string; pinned: boolean }>
 }
 
 type World = {
@@ -46,6 +53,8 @@ type World = {
   runs: string[][]
   stdin: string[]
   lemonade: Lemonade
+  /** The session's subagents, as $.agent.list answers. */
+  agents: Array<{ id: string; type: string; description: string; status: string }>
 }
 
 /**
@@ -85,7 +94,19 @@ function world(
     return { value: undefined }
   })
   on('fs.exists', ($, e) => ({ value: !!opts.installed && e.path === `${env.get('LOCALAPPDATA')}\\lemonade_server\\bin\\LemonadeServer.exe` }))
-  const lemonade: Lemonade = { models: JSON.parse(JSON.stringify(MODELS)), jobs: [], pulls: [], fetched: [], curled: [] }
+  const lemonade: Lemonade = {
+    models: JSON.parse(JSON.stringify(MODELS)),
+    jobs: [],
+    pulls: [],
+    fetched: [],
+    curled: [],
+    // The loaded model starts unpinned, loaded by nobody in particular.
+    loaded: [{ model_name: 'Qwen3.5-4B-GGUF', type: 'llm', pinned: false, recipe_options: { ctx_size: 262144 } }],
+    loads: [],
+    pins: [],
+  }
+  const agents: World['agents'] = []
+  on('agent.list', () => ({ value: agents }) as never)
 
   /** The fake Lemonade answering one request, or null when it isn't up. */
   const serve = async (url: string, method = 'GET', sent?: string): Promise<{ status: number; text: string } | null> => {
@@ -96,7 +117,43 @@ function world(
     if (path === '/api/v1/pull') await lemonade.pullGate
     let body: unknown
     if (path === '/api/v1/models?show_all=true') body = { data: lemonade.models }
-    else if (path === '/api/v1/health') body = HEALTH
+    else if (path === '/api/v1/health') body = { all_models_loaded: lemonade.loaded }
+    else if (path === '/internal/pin' && method === 'POST') {
+      const pin = JSON.parse(sent ?? '{}') as { model_name: string; pinned: boolean }
+      lemonade.pins.push(pin)
+      const here = lemonade.loaded.find(m => m.model_name === pin.model_name)
+      if (!here) return { status: 404, text: JSON.stringify({ error: { message: `Model not loaded: ${pin.model_name}` } }) }
+      here.pinned = pin.pinned
+      body = { model_name: pin.model_name, pinned: pin.pinned, status: 'success' }
+    } else if (path === '/api/v1/load' && method === 'POST') {
+      const load = JSON.parse(sent ?? '{}') as { model_name: string; ctx_size?: number; pinned?: boolean }
+      lemonade.loads.push(load)
+      const known = lemonade.models.find(m => m.id === load.model_name)
+      if (!known) return { status: 404, text: JSON.stringify({ error: { message: `model '${load.model_name}' not found` } }) }
+      const loaded = { model_name: load.model_name, type: 'llm', pinned: load.pinned === true, recipe_options: { ctx_size: load.ctx_size ?? 262144 } }
+      const here = lemonade.loaded.findIndex(m => m.model_name === load.model_name)
+      if (here >= 0) lemonade.loaded[here] = loaded
+      else {
+        // One chat slot: an unpinned model makes room, a pinned one refuses.
+        const evictable = lemonade.loaded.findIndex(m => !m.pinned)
+        if (lemonade.loaded.length >= 1 && evictable < 0) {
+          return {
+            status: 409,
+            text: JSON.stringify({
+              error: {
+                code: 'slots_pinned_error',
+                message: 'All loaded models of type standard/llm are pinned. Unload a model first.',
+                requested_model: load.model_name,
+                type: 'slots_pinned_error',
+              },
+            }),
+          }
+        }
+        if (lemonade.loaded.length >= 1) lemonade.loaded.splice(evictable, 1)
+        lemonade.loaded.push(loaded)
+      }
+      body = { model_name: load.model_name, status: 'success' }
+    }
     else if (path === '/api/v1/downloads') body = lemonade.jobs
     else if (path === '/api/v1/system-info') body = SYSTEM
     else if (path === '/api/v1/pull' && method === 'POST') {
@@ -139,7 +196,7 @@ function world(
     if (opts.failSteps) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn' as const, usage: null }
   })
-  return { env, asked, session, toasts, runs, stdin, lemonade }
+  return { env, asked, session, toasts, runs, stdin, lemonade, agents }
 }
 
 async function start($: Engine) {
@@ -669,6 +726,146 @@ describe('which models count', () => {
     await lemonade($, 'on')
     await step($)
     expect(asked).toEqual(['user.Phi-4-Mini-GGUF @ http://127.0.0.1:13305'])
+  })
+})
+
+describe('sharing Lemonade', () => {
+  test('a model not loaded is loaded explicitly, with a bounded window, pinned', async ($, on) => {
+    const { session, asked, toasts, lemonade: server } = world(on)
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(server.loads).toEqual([{ model_name: 'Gemma-Chat-GGUF', ctx_size: 65536, pinned: true }])
+    expect(server.loaded).toEqual([{ model_name: 'Gemma-Chat-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 65536 } }])
+    expect(asked).toEqual(['Gemma-Chat-GGUF @ http://127.0.0.1:13305'])
+    // Qwen was unpinned and nobody's LemonClaude knew: it made room, and the toast says so.
+    expect(toasts.some(t => t.includes('Loaded Gemma-Chat-GGUF with a 64K window. Lemonade unloaded Qwen3.5-4B-GGUF to make room.'))).toBe(true)
+  })
+
+  test('LEMONCLAUDE_CTX_SIZE sets the window, never under 4096', async ($, on) => {
+    const { session, lemonade: server } = world(on, { LEMONCLAUDE_CTX_SIZE: '1024' })
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(server.loads[0]?.ctx_size).toBe(4096)
+  })
+
+  test('a model loaded already is pinned, never loaded again', async ($, on) => {
+    const { session, lemonade: server } = world(on)
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    await step($, session.model)
+    expect(server.loads).toEqual([])
+    expect(server.pins).toEqual([{ model_name: 'Qwen3.5-4B-GGUF', pinned: true }])
+  })
+
+  test('a model not downloaded is never loaded, which would download it', async ($, on) => {
+    // Offered from memory while Lemonade was down, and since deleted from Lemonade's disk.
+    const lastOffer = { id: 'Not-Pulled-GGUF', labels: ['chat'], recipe: 'llamacpp', isDownloaded: true, hasTools: true, isLoaded: false }
+    const { session, toasts, lemonade: server } = world(on, WINDOWS, { reachable: false, installed: true, store: { lastOffer } })
+    await start($)
+    session.model = 'Not-Pulled-GGUF'
+    await step($, session.model)
+    expect(server.loads).toEqual([])
+    expect(toasts.some(t => t.includes("Not-Pulled-GGUF isn't downloaded. Download it from /lemonade first."))).toBe(true)
+  })
+
+  test('the pin is given back on /lemonade off, and the model stays loaded', async ($, on) => {
+    const { lemonade: server } = world(on)
+    await start($)
+    await lemonade($, 'on')
+    expect(server.loaded[0]?.pinned).toBe(true)
+    await lemonade($, 'off')
+    expect(server.pins.at(-1)).toEqual({ model_name: 'Qwen3.5-4B-GGUF', pinned: false })
+    expect(server.loaded.map(m => m.model_name)).toEqual(['Qwen3.5-4B-GGUF'])
+  })
+
+  test('the pin is given back when the session ends', async ($, on) => {
+    const { lemonade: server } = world(on)
+    await start($)
+    await lemonade($, 'on')
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { kind: 'none' } as never })
+    expect(server.pins.at(-1)).toEqual({ model_name: 'Qwen3.5-4B-GGUF', pinned: false })
+  })
+
+  test('the pin is given back when a Claude model is picked in the selector', async ($, on) => {
+    const { session, lemonade: server } = world(on)
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    expect(server.loaded[0]?.pinned).toBe(true)
+    session.model = 'claude-opus-5-5'
+    await step($)
+    expect(server.loaded[0]?.pinned).toBe(false)
+  })
+
+  test('switching Lemonade models moves the pin, through the one slot', async ($, on) => {
+    const { session, asked, lemonade: server } = world(on)
+    await start($)
+    await lemonade($, 'on')
+    await step($)
+    await lemonade($, 'on gemma')
+    await step($)
+    expect(asked).toEqual(['Qwen3.5-4B-GGUF @ http://127.0.0.1:13305', 'Gemma-Chat-GGUF @ http://127.0.0.1:13305'])
+    expect(server.loaded).toEqual([{ model_name: 'Gemma-Chat-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 65536 } }])
+    expect(session.model).toBe('claude-opus-5-5')
+  })
+
+  test("another app's pin is never touched, and its conflict is named exactly, once", async ($, on) => {
+    const { session, toasts, lemonade: server } = world(on, {}, { failSteps: true })
+    server.loaded = [{ model_name: 'Their-Model-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 8192 } }]
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await Promise.all([step($, session.model), step($, 'claude-haiku-4-5', 'agent-1')])
+    const said = toasts.filter(t => t.includes('Another app has pinned'))
+    expect(said).toHaveLength(1)
+    expect(said[0]).toContain("Another app has pinned Lemonade's chat models (Their-Model-GGUF), so Gemma-Chat-GGUF can't load.")
+    expect(toasts.some(t => t.includes("didn't answer"))).toBe(false)
+    expect(server.loaded.map(m => [m.model_name, m.pinned])).toEqual([['Their-Model-GGUF', true]])
+    expect(server.pins).toEqual([])
+    // Going back to Claude leaves their pin alone too.
+    session.model = 'claude-opus-5-5'
+    await step($)
+    expect(server.pins).toEqual([])
+  })
+
+  test('/lemonade on says the conflict and stays off', async ($, on) => {
+    const { asked, lemonade: server } = world(on)
+    server.loaded = [{ model_name: 'Their-Model-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 8192 } }]
+    await start($)
+    const { text } = await lemonade($, 'on gemma')
+    expect(text).toContain('Another app has pinned')
+    await step($)
+    expect(asked).toEqual(['claude-opus-5-5 @ default'])
+  })
+
+  test('the model manager marks a model another app pinned', async ($, on) => {
+    const { lemonade: server } = world(on)
+    server.loaded = [{ model_name: 'Gemma-Chat-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 8192 } }]
+    await start($)
+    const ui = await manager($, 'desktop')
+    expect((await ui.find({ key: 'row-Gemma-Chat-GGUF' }))?.text).toContain('pinned by another app')
+  })
+
+  test("another plugin's agent steps pass untouched: no rename, no load, no routing", async ($, on) => {
+    const { asked, agents, lemonade: server } = world(on)
+    agents.push({ id: 'agent-9', type: 'other:worker', description: 'local worker', status: 'running' })
+    await start($)
+    await lemonade($, 'on gemma')
+    server.loads.length = 0
+    server.pins.length = 0
+    await step($, 'claude-haiku-4-5', 'agent-9')
+    expect(asked).toEqual(['claude-haiku-4-5 @ http://127.0.0.1:13305'])
+    expect(server.loads).toEqual([])
+    expect(server.pins).toEqual([])
+  })
+
+  test("a pin a crashed session left an hour ago is given back at the next start", async ($, on) => {
+    const { lemonade: server } = world(on, {}, { store: { pinned: { 'Qwen3.5-4B-GGUF': Date.now() - 2 * 60 * 60 * 1000 } } })
+    server.loaded[0]!.pinned = true
+    await start($)
+    expect(server.pins).toEqual([{ model_name: 'Qwen3.5-4B-GGUF', pinned: false }])
   })
 })
 

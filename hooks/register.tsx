@@ -23,6 +23,7 @@ const search = atom({ plugin: 'lemonclaude', key: 'search' } as const, '')
 const isDownloadedOnly = atom({ plugin: 'lemonclaude', key: 'isDownloadedOnly' } as const, false)
 const expanded = atom({ plugin: 'lemonclaude', key: 'expanded' } as const, [] as string[])
 const recipeInfo = atom({ plugin: 'lemonclaude', key: 'recipes' } as const, {} as Record<string, Recipe>)
+const isTooBigShown = atom({ plugin: 'lemonclaude', key: 'isTooBigShown' } as const, false)
 
 type $ = EngineInterface
 
@@ -135,13 +136,16 @@ export async function listCatalog($: $, base: string): Promise<{ models: Lemonad
   const known = (system?.ok ? parsed(system.text)?.recipes : undefined) as
     | Record<string, { default_backend?: string; backends?: Record<string, { state?: string }> }>
     | undefined
-  // Where each recipe runs by default, and whether that backend is installed yet.
+  // Where each recipe runs by default, whether that backend is installed yet, and the memory it has.
+  const memoryOf = hardwareMemory(system?.ok ? parsed(system.text) : undefined)
   const about: Record<string, Recipe> = {}
   for (const [name, r] of Object.entries(known ?? {})) {
     const backend = r.default_backend ?? ''
     const state = r.backends?.[backend]?.state
-    if (backend) about[name] = { device: BACKENDS[backend] ?? backend, isInstalled: state === 'installed' }
+    if (backend) about[name] = { device: BACKENDS[backend] ?? backend, isInstalled: state === 'installed', ...memoryOf(backend) }
   }
+  // A collection's components run on llama.cpp.
+  const recipeOf = (recipe: string) => about[recipe] ?? (recipe.startsWith('collection.') ? about.llamacpp : undefined)
   if (known) {
     cannot = new Set(
       Object.entries(known)
@@ -165,6 +169,7 @@ export async function listCatalog($: $, base: string): Promise<{ models: Lemonad
       isDownloaded: m.downloaded !== false,
       hasTools: (m.labels ?? []).includes('tool-calling'),
       isLoaded: loaded.has(m.id),
+      ...(fits(m.size, recipeOf(m.recipe ?? '')) ? {} : { isTooBig: true }),
       ...(loaded.get(m.id)?.pinned ? { pin: m.id in held ? ('mine' as const) : ('theirs' as const) } : {}),
     }))
     .sort((a, b) => a.id.localeCompare(b.id, undefined, { sensitivity: 'base' }))
@@ -258,6 +263,46 @@ function watchDownloads($: $): void {
   )
 }
 
+type Hardware = {
+  'Physical Memory'?: string
+  devices?: {
+    nvidia_gpu?: Array<{ available?: boolean; vram_gb?: number }>
+    amd_gpu?: Array<{ available?: boolean; integrated?: boolean; vram_gb?: number }>
+  }
+}
+
+/**
+ * The memory a backend's models run in, from /api/v1/system-info: a discrete GPU's own memory for
+ * CUDA, ROCm and Vulkan where there is such a GPU, else system memory (the NPU, the CPU, an
+ * integrated GPU, Apple's unified memory). Nothing when Lemonade doesn't say.
+ */
+function hardwareMemory(info: Hardware | undefined): (backend: string) => Pick<Recipe, 'memoryGb' | 'isShared'> {
+  const ramGb = Number(/([\d.]+)\s*GB/i.exec(info?.['Physical Memory'] ?? '')?.[1]) || undefined
+  const largest = (gbs: number[]) => (gbs.length > 0 ? Math.max(...gbs) : undefined)
+  const nvidia = largest((info?.devices?.nvidia_gpu ?? []).filter(g => g.available !== false).map(g => g.vram_gb ?? 0))
+  const amd = largest((info?.devices?.amd_gpu ?? []).filter(g => g.available !== false && !g.integrated).map(g => g.vram_gb ?? 0))
+  const onGpu = (gb: number | undefined) => (gb ? { memoryGb: gb, isShared: false } : {})
+  const shared = ramGb ? { memoryGb: ramGb, isShared: true } : {}
+  return backend => {
+    if (backend === 'cuda') return onGpu(nvidia)
+    if (backend === 'rocm') return onGpu(amd)
+    if (backend === 'vulkan') return nvidia || amd ? onGpu(Math.max(nvidia ?? 0, amd ?? 0)) : shared
+    return shared
+  }
+}
+
+/**
+ * Whether a model of `sizeGb` fits the memory its recipe runs in. Loaded, a model takes about 40% more
+ * than its file plus 1 GB: the context window, a vision projector, working buffers (live, the 2B took
+ * 3.2 GB and the 4B 6.0 GB at a 64K window). System memory is shared with everything else, so a model
+ * gets half of it. Unknown sizes or memory count as fitting.
+ */
+function fits(sizeGb: number | undefined, recipe: Recipe | undefined): boolean {
+  if (sizeGb === undefined || recipe?.memoryGb === undefined) return true
+  const room = recipe.isShared ? recipe.memoryGb / 2 : recipe.memoryGb
+  return sizeGb * 1.4 + 1 <= room
+}
+
 function recipeName(recipe: string): string {
   return RECIPES[recipe] ?? (recipe || 'Other')
 }
@@ -345,7 +390,7 @@ function sizeRange(models: readonly LemonadeModel[]): string {
 
 function tags(m: LemonadeModel): string {
   const pin = m.pin === 'theirs' ? 'pinned by another app' : m.pin === 'mine' ? 'pinned' : ''
-  return [m.hasTools ? 'tools' : '', ...['vision', 'reasoning', 'coding'].filter(l => m.labels.includes(l)), pin]
+  return [m.isTooBig ? 'too big' : '', m.hasTools ? 'tools' : '', ...['vision', 'reasoning', 'coding'].filter(l => m.labels.includes(l)), pin]
     .filter(Boolean)
     .join(' · ')
 }
@@ -918,6 +963,7 @@ export const register: Register = on => {
     // A new list starts unfiltered and collapsed: an empty search box, every folder closed.
     await update($, search, () => '')
     await update($, expanded, () => [] as string[])
+    await update($, isTooBigShown, () => false)
     const list = await refresh($)
     if (await pollDownloads($)) watchDownloads($)
     return { text: await describe($, list) }
@@ -959,6 +1005,7 @@ export const register: Register = on => {
     const onlyDownloaded = await read($, isDownloadedOnly)
     const open = await read($, expanded)
     const about = await read($, recipeInfo)
+    const isTooBigShownNow = await read($, isTooBigShown)
     const jobs = await read($, downloads)
     const now = await read($, routed)
     const held = (await read($, heldOver)) !== null
@@ -1037,7 +1084,10 @@ export const register: Register = on => {
     const matches = query ? all.filter(m => m.id.toLowerCase().includes(query)) : all
     const loaded = matches.filter(m => m.isLoaded)
     const ready = matches.filter(m => m.isDownloaded && !m.isLoaded)
-    const suggested = onlyDownloaded ? [] : matches.filter(m => !m.isDownloaded)
+    // Models too big for this machine are left out unless asked for; downloaded ones always show.
+    const toDownload = onlyDownloaded ? [] : matches.filter(m => !m.isDownloaded)
+    const suggested = isTooBigShownNow ? toDownload : toDownload.filter(m => !m.isTooBig)
+    const tooBig = toDownload.length - suggested.length
     const groups = new Map<string, LemonadeModel[]>()
     for (const m of suggested) groups.set(m.recipe, [...(groups.get(m.recipe) ?? []), m])
     const recipes = [...groups.keys()].sort((a, b) => recipeName(a).localeCompare(recipeName(b)))
@@ -1046,7 +1096,8 @@ export const register: Register = on => {
     const group = (recipe: string) => {
       const models = groups.get(recipe)!
       const runs = about[recipe]
-      const notes = runs ? [runs.device, ...(runs.isInstalled ? [] : ['backend not installed yet'])] : []
+      const memory = runs?.memoryGb ? `${Math.round(runs.memoryGb)} GB${runs.isShared ? ' RAM' : ''}` : ''
+      const notes = runs ? [[runs.device, memory].filter(Boolean).join(', '), ...(runs.isInstalled ? [] : ['backend not installed yet'])] : []
       return entry({ kind: 'folder', key: recipe, name: recipeName(recipe), models, inner: recipeEntries(recipe, models), notes })
     }
 
@@ -1078,10 +1129,19 @@ export const register: Register = on => {
             label={onlyDownloaded ? '☑ Downloaded only' : '☐ Downloaded only'}
             onPress={() => void update($, isDownloadedOnly, x => !x)}
           />
+          <Button
+            key="too-big"
+            label={isTooBigShownNow ? '☑ Show too big' : '☐ Show too big'}
+            onPress={() => void update($, isTooBigShown, x => !x)}
+          />
         </Box>
         {section(`ACTIVE · ${loaded.length} loaded`, loaded, query ? 'No loaded model matches.' : 'No models loaded.')}
         {section(`DOWNLOADED · ${ready.length} ready`, ready, query ? 'No downloaded model matches.' : 'Nothing else downloaded yet.')}
-        {onlyDownloaded ? null : <Text bold dimColor>{`SUGGESTED · ${suggested.length} to download`}</Text>}
+        {onlyDownloaded ? null : (
+          <Text bold dimColor>
+            {`SUGGESTED · ${suggested.length} to download${tooBig > 0 ? ` · ${tooBig} too big for this machine, hidden` : ''}`}
+          </Text>
+        )}
         {onlyDownloaded ? null : recipes.length > 0 ? (
           <Box flexDirection="column">{recipes.map(group)}</Box>
         ) : (

@@ -12,6 +12,8 @@ export type LemonadeModel = {
   hasTools: boolean
   /** True while Lemonade has it loaded in memory. */
   isLoaded: boolean
+  /** True when it is too big for the memory its recipe runs in on this machine. */
+  isTooBig?: boolean
   /** Who pinned it, while it is loaded and pinned: LemonClaude (`mine`) or another app (`theirs`). */
   pin?: 'mine' | 'theirs'
 }
@@ -25,7 +27,14 @@ export type DownloadState = {
 }
 
 /** Where a Lemonade recipe runs by default (`NPU`, `NVIDIA GPU`), and whether that backend is installed. */
-export type Recipe = { device: string; isInstalled: boolean }
+export type Recipe = {
+  device: string
+  isInstalled: boolean
+  /** The memory its models run in, in GB: a discrete GPU's own, or the system's. */
+  memoryGb?: number
+  /** True when that is system memory, shared with everything else. */
+  isShared?: boolean
+}
 
 /** The environment as it was before requests went to Lemonade, restored when they stop. */
 export type SavedEnv = {
@@ -57,6 +66,8 @@ declare module 'claude-code' {
       isDownloadedOnly: boolean
       /** The folders the model list has open; every /lemonade starts with none. */
       expanded: string[]
+      /** True while the model list shows suggested models too big for this machine. */
+      isTooBigShown: boolean
       /** Each recipe's default device and backend state, as /api/v1/system-info says. */
       recipes: Record<string, Recipe>
     }

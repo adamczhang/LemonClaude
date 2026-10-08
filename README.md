@@ -93,6 +93,7 @@ These work in the terminal too.
 `/lemonade` with nothing after it draws a model list in the transcript:
 
 - **Search** filters by name. **Downloaded only** hides models you'd have to download.
+- **Models too big for this machine are hidden** from Suggested, and its heading says how many. **Show too big** shows them, tagged `too big`. A model fits when its file, plus about 40% and 1 GB for its context window and working buffers, fits the memory its recipe runs in. That's a discrete GPU's own memory (Llama.cpp on an NVIDIA GPU), or half the system's for the NPU, the CPU or an integrated GPU, since that memory is shared. A downloaded model always shows, tagged `too big` if it is.
 - **Active** lists models Lemonade has loaded in memory, marked with a green dot.
 - **Downloaded** lists models on disk and ready to use.
 - **Suggested** lists every other chat model Lemonade offers, in folders, as Lemonade's own model manager nests them:

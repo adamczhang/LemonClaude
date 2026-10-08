@@ -17,6 +17,9 @@ const MODELS = [
 type Loaded = { model_name: string; type: string; pinned: boolean; recipe_options: { ctx_size: number }; pid?: number }
 // What this machine can run, as /api/v1/system-info judges it: no NPU for FastFlowLM.
 const SYSTEM = {
+  'Physical Memory': '64.00 GB',
+  // A roomy GPU, so the fixtures' models fit unless a test says otherwise.
+  devices: { nvidia_gpu: [{ available: true, vram_gb: 24 }], amd_gpu: [{ available: true, integrated: true }] },
   recipes: {
     llamacpp: { default_backend: 'cuda', backends: { cuda: { state: 'installed' }, rocm: { state: 'unsupported' } } },
     'ryzenai-llm': { default_backend: 'npu', backends: { npu: { state: 'installable' } } },
@@ -37,6 +40,8 @@ type Lemonade = {
   pullError?: string
   /** Lemonade fails each load with this error. */
   loadError?: string
+  /** /api/v1/system-info, when a test gives other hardware. */
+  system?: typeof SYSTEM
   /** What Windows' GPU counters say about each model's server process, as PowerShell prints it. */
   gpu?: string
   /** Each request that went out through curl, as `METHOD /path`. */
@@ -166,7 +171,7 @@ function world(
       body = { model_name: load.model_name, status: 'success' }
     }
     else if (path === '/api/v1/downloads') body = lemonade.jobs
-    else if (path === '/api/v1/system-info') body = SYSTEM
+    else if (path === '/api/v1/system-info') body = lemonade.system ?? SYSTEM
     else if (path === '/api/v1/pull' && method === 'POST') {
       const pull = JSON.parse(sent ?? '{}') as { model_name: string }
       lemonade.pulls.push(pull)
@@ -343,8 +348,8 @@ describe('model manager', () => {
       // Then the rest, grouped by recipe as Lemonade groups them, each model in one place only.
       expect((await ui.find({ type: 'Text', text: /^SUGGESTED/ }))?.text).toBe('SUGGESTED · 2 to download')
       // Each recipe says where it runs, and when its backend isn't installed yet.
-      expect((await ui.find({ key: 'group-box-llamacpp' }))?.text).toContain('Llama.cpp GPU1 · 9.00 GB · NVIDIA GPU')
-      expect((await ui.find({ key: 'group-box-ryzenai-llm' }))?.text).toContain('Ryzen AI LLM1 · 650 MB · NPU · backend not installed yet')
+      expect((await ui.find({ key: 'group-box-llamacpp' }))?.text).toContain('Llama.cpp GPU1 · 9.00 GB · NVIDIA GPU, 24 GB')
+      expect((await ui.find({ key: 'group-box-ryzenai-llm' }))?.text).toContain('Ryzen AI LLM1 · 650 MB · NPU, 64 GB RAM · backend not installed yet')
       expect(await ui.findAll({ key: 'row-Qwen3.5-4B-GGUF' })).toHaveLength(1)
       // Speech, music, models Lemonade doesn't suggest, and recipes this machine can't run stay out.
       expect(await ui.find({ key: 'group-whispercpp' })).toBeUndefined()
@@ -755,6 +760,45 @@ describe('model list nesting', () => {
     // (Qwen3.5-4B-GGUF, loaded, sits under Active, not in the folder.)
     const rows = (await ui.findAll({ type: 'Box' })).map(b => b.key).filter(k => k?.startsWith('row-Qwen3.5') && k !== 'row-Qwen3.5-4B-GGUF')
     expect(rows).toEqual(['row-Qwen3.5-2B-GGUF', 'row-Qwen3.5-9B-GGUF', 'row-Qwen3.5-27B-GGUF'])
+  })
+
+  test('models too big for this machine are hidden until asked for, and say so', async ($, on) => {
+    const { lemonade: server } = world(on)
+    // An 8 GB GPU: a 9 GB model can't fit; the NPU's share of 64 GB holds a 16 GB one.
+    server.system = { ...SYSTEM, devices: { nvidia_gpu: [{ available: true, vram_gb: 8 }], amd_gpu: [] } }
+    server.models.push(suggest('Big-NPU-Model-Hybrid', 16, 'ryzenai-llm'), suggest('Small-1B-GGUF', 0.8))
+    await start($)
+    const ui = await manager($, 'desktop')
+    expect((await ui.find({ type: 'Text', text: /^SUGGESTED/ }))?.text).toBe('SUGGESTED · 3 to download · 1 too big for this machine, hidden')
+    expect((await ui.find({ key: 'group-box-llamacpp' }))?.text).toContain('Llama.cpp GPU1 · 800 MB · NVIDIA GPU, 8 GB')
+    await ui.press({ key: 'group-llamacpp' })
+    expect(await ui.find({ key: 'get-Not-Pulled-GGUF' })).toBeUndefined()
+    expect(await ui.find({ key: 'get-Small-1B-GGUF' })).toBeDefined()
+    await ui.press({ key: 'group-ryzenai-llm' })
+    expect(await ui.find({ key: 'get-Big-NPU-Model-Hybrid' })).toBeDefined()
+    // Asked for, they show, marked.
+    await ui.press({ key: 'too-big' })
+    expect((await ui.find({ key: 'row-Not-Pulled-GGUF' }))?.text).toContain('too big')
+    // The next /lemonade hides them again.
+    const again = await manager($, 'desktop', '', 'm2')
+    expect((await again.find({ type: 'Text', text: /^SUGGESTED/ }))?.text).toContain('1 too big for this machine, hidden')
+  })
+
+  test('a downloaded model too big for this machine still shows, marked', async ($, on) => {
+    const { lemonade: server } = world(on)
+    server.system = { ...SYSTEM, devices: { nvidia_gpu: [{ available: true, vram_gb: 2 }], amd_gpu: [] } }
+    await start($)
+    const ui = await manager($, 'desktop')
+    expect((await ui.find({ key: 'row-Gemma-Chat-GGUF' }))?.text).toContain('too big')
+    expect(await ui.find({ key: 'use-Gemma-Chat-GGUF' })).toBeDefined()
+  })
+
+  test('without hardware facts, every model shows', async ($, on) => {
+    const { lemonade: server } = world(on)
+    server.system = { recipes: SYSTEM.recipes } as never
+    await start($)
+    const ui = await manager($, 'desktop')
+    expect((await ui.find({ type: 'Text', text: /^SUGGESTED/ }))?.text).toBe('SUGGESTED · 2 to download')
   })
 
   test('every /lemonade starts with all folders closed', async ($, on) => {

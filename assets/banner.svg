@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" role="img" aria-labelledby="title desc">
+  <title id="title">LemonClaude</title>
+  <desc id="desc">A red lobster hugging a lemon, next to the words LemonClaude: run Claude Code on a local Lemonade model.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFF9DC"/>
+      <stop offset="1" stop-color="#FFE7A3"/>
+    </linearGradient>
+    <radialGradient id="lemon" cx="0.38" cy="0.32" r="0.75">
+      <stop offset="0" stop-color="#FFF27A"/>
+      <stop offset="0.6" stop-color="#FFD83A"/>
+      <stop offset="1" stop-color="#F2B814"/>
+    </radialGradient>
+    <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F2604A"/>
+      <stop offset="1" stop-color="#D23A2C"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="360" rx="28" fill="url(#bg)"/>
+
+  <!-- Background lemon slices -->
+  <g opacity="0.18" fill="none" stroke="#E0A800" stroke-width="6">
+    <circle cx="1130" cy="318" r="70"/>
+    <circle cx="1130" cy="318" r="52"/>
+    <path d="M1130 266 V370 M1078 318 H1182 M1093 281 L1167 355 M1167 281 L1093 355"/>
+    <circle cx="70" cy="300" r="46"/>
+    <circle cx="70" cy="300" r="32"/>
+    <path d="M70 254 V346 M24 300 H116 M37 267 L103 333 M103 267 L37 333"/>
+  </g>
+
+  <!-- Shadow -->
+  <ellipse cx="335" cy="318" rx="170" ry="18" fill="#C98F00" opacity="0.18"/>
+
+  <!-- Lobster: antennae, tail and legs, behind the lemon -->
+  <g fill="none" stroke="#D23A2C" stroke-width="5" stroke-linecap="round">
+    <path d="M308 52 C 270 0, 200 -4, 150 40"/>
+    <path d="M352 52 C 390 0, 460 -4, 520 34"/>
+  </g>
+  <g fill="url(#shell)" stroke="#B02E22" stroke-width="3">
+    <ellipse cx="448" cy="268" rx="28" ry="21"/>
+    <ellipse cx="480" cy="282" rx="23" ry="17"/>
+    <ellipse cx="507" cy="292" rx="18" ry="14"/>
+    <ellipse cx="533" cy="286" rx="16" ry="9" transform="rotate(-35 533 286)"/>
+    <ellipse cx="538" cy="301" rx="17" ry="9"/>
+    <ellipse cx="532" cy="316" rx="16" ry="9" transform="rotate(35 532 316)"/>
+  </g>
+  <g stroke="#D23A2C" stroke-width="7" stroke-linecap="round">
+    <path d="M285 282 l -14 26"/>
+    <path d="M315 290 l -6 24"/>
+    <path d="M355 290 l 6 24"/>
+    <path d="M385 282 l 14 26"/>
+  </g>
+
+  <!-- Lobster head, peeking over the lemon -->
+  <ellipse cx="330" cy="92" rx="72" ry="58" fill="url(#shell)" stroke="#B02E22" stroke-width="3"/>
+  <g stroke="#B02E22" stroke-width="6" stroke-linecap="round">
+    <path d="M306 50 L 300 28"/>
+    <path d="M354 50 L 360 28"/>
+  </g>
+  <g>
+    <circle cx="298" cy="26" r="16" fill="#fff" stroke="#B02E22" stroke-width="3"/>
+    <circle cx="362" cy="26" r="16" fill="#fff" stroke="#B02E22" stroke-width="3"/>
+    <circle cx="302" cy="29" r="8" fill="#2A1A10"/>
+    <circle cx="358" cy="29" r="8" fill="#2A1A10"/>
+    <circle cx="305" cy="25" r="3" fill="#fff"/>
+    <circle cx="361" cy="25" r="3" fill="#fff"/>
+  </g>
+  <ellipse cx="285" cy="98" rx="13" ry="7" fill="#FF9AA2" opacity="0.8"/>
+  <ellipse cx="375" cy="98" rx="13" ry="7" fill="#FF9AA2" opacity="0.8"/>
+  <path d="M314 96 Q 330 112, 346 96" fill="none" stroke="#5A1A12" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- The lemon -->
+  <g transform="rotate(-10 330 205)">
+    <ellipse cx="208" cy="205" rx="16" ry="12" fill="#F2B814"/>
+    <ellipse cx="452" cy="205" rx="16" ry="12" fill="#F2B814"/>
+    <ellipse cx="330" cy="205" rx="128" ry="96" fill="url(#lemon)" stroke="#E0A800" stroke-width="4"/>
+    <ellipse cx="282" cy="160" rx="42" ry="16" fill="#fff" opacity="0.45" transform="rotate(-18 282 160)"/>
+    <g fill="#E6B000" opacity="0.5">
+      <circle cx="372" cy="240" r="2.5"/><circle cx="392" cy="222" r="2.5"/>
+      <circle cx="350" cy="262" r="2.5"/><circle cx="300" cy="258" r="2.5"/>
+      <circle cx="402" cy="252" r="2.5"/><circle cx="262" cy="236" r="2.5"/>
+    </g>
+  </g>
+  <path d="M452 168 q 34 -42 74 -24 q -30 38 -74 24 z" fill="#6DBB45" stroke="#4E9A2E" stroke-width="3"/>
+  <path d="M456 166 q 30 -12 62 -18" fill="none" stroke="#4E9A2E" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Arms and claws, hugging the front of the lemon -->
+  <g fill="none" stroke="#D23A2C" stroke-width="18" stroke-linecap="round">
+    <path d="M272 122 C 196 140, 188 214, 246 226"/>
+    <path d="M388 122 C 464 140, 472 214, 414 226"/>
+  </g>
+  <g fill="url(#shell)" stroke="#B02E22" stroke-width="3">
+    <ellipse cx="262" cy="214" rx="34" ry="19" transform="rotate(-24 262 214)"/>
+    <ellipse cx="268" cy="241" rx="24" ry="12" transform="rotate(-8 268 241)"/>
+    <ellipse cx="398" cy="214" rx="34" ry="19" transform="rotate(24 398 214)"/>
+    <ellipse cx="392" cy="241" rx="24" ry="12" transform="rotate(8 392 241)"/>
+  </g>
+
+  <!-- Hearts -->
+  <g fill="#FF6B81">
+    <path d="M470 70 c -8 -12 -26 -4 -18 10 l 18 16 l 18 -16 c 8 -14 -10 -22 -18 -10 z"/>
+    <path d="M512 112 c -5 -8 -17 -3 -12 7 l 12 10 l 12 -10 c 5 -10 -7 -15 -12 -7 z" opacity="0.75"/>
+    <path d="M170 92 c -5 -8 -17 -3 -12 7 l 12 10 l 12 -10 c 5 -10 -7 -15 -12 -7 z" opacity="0.6"/>
+  </g>
+
+  <!-- Wordmark -->
+  <g font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif">
+    <text x="604" y="160" font-size="80" font-weight="800" textLength="520" lengthAdjust="spacingAndGlyphs">
+      <tspan fill="#D49A00">Lemon</tspan><tspan fill="#D9573B">Claude</tspan>
+    </text>
+    <text x="608" y="206" font-size="26" fill="#6B5420" textLength="520" lengthAdjust="spacingAndGlyphs">Run Claude Code on a local Lemonade model</text>
+    <g font-size="19" font-weight="600">
+      <rect x="608" y="234" width="184" height="36" rx="18" fill="#fff" opacity="0.75"/>
+      <text x="700" y="258" text-anchor="middle" fill="#8A6A10">Claude Code mod</text>
+      <rect x="806" y="234" width="176" height="36" rx="18" fill="#fff" opacity="0.75"/>
+      <text x="894" y="258" text-anchor="middle" fill="#8A6A10">switch any time</text>
+    </g>
+  </g>
+</svg>

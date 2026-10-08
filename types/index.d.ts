@@ -18,7 +18,7 @@ export type SavedEnv = {
 
 declare module 'claude-code' {
   interface PluginState {
-    sidekick: {
+    lemonclaude: {
       /** The Lemonade model the model selector offers, or null when none is offered. */
       offered: string | null
       /** The Lemonade model requests go to now, or null while Claude answers. */

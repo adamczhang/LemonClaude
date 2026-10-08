@@ -108,8 +108,8 @@ describe('model selector entry', () => {
     expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION')).toContain('Lemonade not running')
   })
 
-  test('SIDEKICK_LEMONADE_MODEL names the model to offer while Lemonade is down', async ($, on) => {
-    const { env } = world(on, { SIDEKICK_LEMONADE_MODEL: 'Qwen3-Coder-Next-GGUF' }, { reachable: false })
+  test('LEMONCLAUDE_LEMONADE_MODEL names the model to offer while Lemonade is down', async ($, on) => {
+    const { env } = world(on, { LEMONCLAUDE_LEMONADE_MODEL: 'Qwen3-Coder-Next-GGUF' }, { reachable: false })
     await start($)
     expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Qwen3-Coder-Next-GGUF')
   })
@@ -160,7 +160,7 @@ describe('model selector entry', () => {
     await start($)
     await lemonade($, '')
     const ui = await $.ui.mount({
-      plugin: 'sidekick',
+      plugin: 'lemonclaude',
       surface: 'terminal',
       component: 'Pane',
       requestId: 'lemonade-picker',
@@ -168,7 +168,7 @@ describe('model selector entry', () => {
       viewport: { columns: 80, rows: 20 },
     })
     expect((await ui.find({ key: 'model' }))?.type).toBe('Select')
-    await $.ui.select({ plugin: 'sidekick', key: 'model', value: 'Gemma-Chat-GGUF' })
+    await $.ui.select({ plugin: 'lemonclaude', key: 'model', value: 'Gemma-Chat-GGUF' })
     expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Gemma-Chat-GGUF')
   })
 })

@@ -7,11 +7,11 @@ const PANE = 'lemonade-picker'
 const DEFAULT_BASE_URL = 'http://127.0.0.1:13305'
 const DEFAULT_MODEL = 'Qwen3.5-4B-GGUF'
 
-const offered = atom({ plugin: 'sidekick', key: 'offered' } as const, null as string | null)
-const routed = atom({ plugin: 'sidekick', key: 'routed' } as const, null as string | null)
-const saved = atom({ plugin: 'sidekick', key: 'saved' } as const, null as SavedEnv | null)
-const models = atom({ plugin: 'sidekick', key: 'models' } as const, [] as LemonadeModel[])
-const notice = atom({ plugin: 'sidekick', key: 'notice' } as const, '')
+const offered = atom({ plugin: 'lemonclaude', key: 'offered' } as const, null as string | null)
+const routed = atom({ plugin: 'lemonclaude', key: 'routed' } as const, null as string | null)
+const saved = atom({ plugin: 'lemonclaude', key: 'saved' } as const, null as SavedEnv | null)
+const models = atom({ plugin: 'lemonclaude', key: 'models' } as const, [] as LemonadeModel[])
+const notice = atom({ plugin: 'lemonclaude', key: 'notice' } as const, '')
 
 type $ = EngineInterface
 
@@ -97,13 +97,13 @@ async function offer($: $, m: LemonadeModel, isUp = true): Promise<void> {
 }
 
 /**
- * What to offer while Lemonade is down: the model offered last time, else SIDEKICK_LEMONADE_MODEL,
+ * What to offer while Lemonade is down: the model offered last time, else LEMONCLAUDE_LEMONADE_MODEL,
  * else the default. Picking it before Lemonade starts fails with a connection error, as the entry says.
  */
 async function rememberedOffer($: $): Promise<LemonadeModel> {
   const last = (await $.store.get('lastOffer')) as LemonadeModel | undefined
   if (last?.id) return last
-  const id = (await $.env.get('SIDEKICK_LEMONADE_MODEL')) ?? DEFAULT_MODEL
+  const id = (await $.env.get('LEMONCLAUDE_LEMONADE_MODEL')) ?? DEFAULT_MODEL
   return { id, labels: [], hasTools: true, isLoaded: false }
 }
 

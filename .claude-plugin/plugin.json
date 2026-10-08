@@ -1,7 +1,11 @@
 {
-  "name": "sidekick",
+  "name": "lemonclaude",
   "version": "0.1.0",
-  "description": "Run Claude Code on a local Lemonade model: /lemonade picks one, /lemonade off switches back",
-  "author": { "name": "Adam Zhang", "email": "adam.c.zhang@gmail.com" },
+  "description": "Run Claude Code on a local Lemonade model: pick 🍋 in the model selector, pick a Claude model to switch back",
+  "author": { "name": "Adam Zhang", "email": "adam.dadvibes@gmail.com" },
+  "homepage": "https://github.com/adamczhang/LemonClaude",
+  "repository": "https://github.com/adamczhang/LemonClaude",
+  "license": "MIT",
+  "keywords": ["lemonade", "local-llm", "model-selector", "mod"],
   "types": "./types/index.d.ts"
 }

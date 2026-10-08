@@ -281,7 +281,7 @@ async function download($: $, id: string): Promise<void> {
 }
 
 /** A model Lemonade has in memory, as /api/v1/health lists it. */
-type Loaded = { model_name: string; pinned?: boolean; type?: string }
+type Loaded = { model_name: string; pinned?: boolean; type?: string; pid?: number }
 
 /** What Lemonade has loaded now, or null when it doesn't answer. */
 async function loadedNow($: $, base: string): Promise<Loaded[] | null> {
@@ -335,6 +335,52 @@ async function release($: $, model: string): Promise<void> {
   if (!(model in (await ours($)))) return
   await setPin($, await baseUrl($), model, false)
   await remember($, model, false)
+}
+
+const GB = 1024 ** 3
+const MB = 1024 ** 2
+
+/**
+ * How much of the model a Lemonade backend process (`pid`) runs sits in system memory because its GPU
+ * is full, in bytes, or 0. Windows never fails such a load: llama.cpp puts layers in system RAM, or
+ * Windows pages the process's GPU memory there, and the model answers slowly. Windows' per-process
+ * GPU counters say what this process holds on each GPU, its own memory and memory it borrows; whole-
+ * GPU totals can't, since Windows pages an idle program out to let a busy one in. The process spilled
+ * when it borrows over 512 MB (a backend's staging buffers take 100-350 MB), or when it holds under
+ * 60% of the model's size on a GPU at all. A GPU with under 2 GB of its own, an integrated one that
+ * borrows by design, says nothing. Null-free: anything unreadable (not Windows, counters under another
+ * language's names) is 0.
+ */
+async function spilled($: $, pid: number, sizeGb: number | undefined): Promise<number> {
+  if (!(await $.env.get('LOCALAPPDATA'))) return 0
+  const script = String.raw`$owner = ${pid}
+(Get-Counter '\GPU Process Memory(*)\Dedicated Usage','\GPU Process Memory(*)\Shared Usage' -ErrorAction SilentlyContinue).CounterSamples | Where-Object { $_.Path -match "pid_$($owner)_" } | ForEach-Object { 'process|' + $_.Path + '|' + [int64]$_.CookedValue }
+Get-ChildItem HKLM:\SOFTWARE\Microsoft\DirectX -ErrorAction SilentlyContinue | ForEach-Object { $a = Get-ItemProperty $_.PSPath; if ($a.AdapterLuid) { 'adapter|luid_0x{0:x8}_0x{1:x8}|{2}' -f ($a.AdapterLuid -shr 32), ($a.AdapterLuid -band 0xffffffff), [int64]$a.DedicatedVideoMemory } }`
+  const ran = await $.process
+    .run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', '-'], { stdin: `${script}\n`, timeoutMs: 15_000 })
+    .catch(() => undefined)
+  if (!ran || ran.exitCode !== 0) return 0
+  const held = new Map<string, { dedicated: number; shared: number }>()
+  const own = new Map<string, number>()
+  for (const line of ran.stdout.split(/\r?\n/)) {
+    const usage = /pid_\d+_(luid_0x[0-9a-f]+_0x[0-9a-f]+)_phys_\d+\)\\(dedicated|shared) usage\|(\d+)/i.exec(line)
+    if (usage) {
+      const on = held.get(usage[1]!) ?? { dedicated: 0, shared: 0 }
+      on[usage[2]!.toLowerCase() as 'dedicated' | 'shared'] += Number(usage[3])
+      held.set(usage[1]!, on)
+    }
+    const adapter = /^adapter\|(luid_0x[0-9a-f]+_0x[0-9a-f]+)\|(\d+)/i.exec(line)
+    if (adapter) own.set(adapter[1]!, Number(adapter[2]))
+  }
+  // The GPU this process uses most.
+  let gpu: { adapter: string; dedicated: number; shared: number } | undefined
+  for (const [adapter, on] of held) {
+    if (!gpu || on.dedicated + on.shared > gpu.dedicated + gpu.shared) gpu = { adapter, ...on }
+  }
+  if (!gpu || gpu.dedicated + gpu.shared < 256 * MB || (own.get(gpu.adapter) ?? 0) < 2 * GB) return 0
+  if (gpu.shared > 512 * MB) return gpu.shared
+  const size = (sizeGb ?? 0) * GB
+  return size > 0 && gpu.dedicated < 0.6 * size ? size - gpu.dedicated : 0
 }
 
 /** How loading a model for requests went: ready or not, and what to tell the person. */
@@ -434,7 +480,15 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
     .map(m => m.model_name)
   await refresh($)
   const room = gone.length > 0 ? ` Lemonade unloaded ${gone.join(', ')} to make room.` : ''
-  return { ok: true, message: `Loaded ${model} with a ${windowName(ctx)} window.${room}` }
+  // Whether it fit: the process that runs it, on this machine, measured on Windows.
+  const pid = after.find(m => m.model_name === model)?.pid
+  const outside = pid && (await isLocal($)) ? await spilled($, pid, known.size) : 0
+  const slow =
+    outside > 0
+      ? ` About ${(outside / GB).toFixed(1)} GB of it is in system memory because the GPU is full, so it will be slow. ` +
+        `Free GPU memory, lower LEMONCLAUDE_CTX_SIZE, or pick a smaller model.`
+      : ''
+  return { ok: true, message: `Loaded ${model} with a ${windowName(ctx)} window.${room}${slow}` }
 }
 
 // The last toast and when: requests that arrive together (a step and its subagents') say a thing once.
@@ -461,9 +515,14 @@ async function isOthersAgent($: $, agentId: string): Promise<boolean> {
  * LemonadeServer.exe where Lemonade's Windows installer puts it, or null when LemonClaude shouldn't
  * start a server: none installed there, a server that isn't on this machine, or LEMONCLAUDE_AUTOSTART=0.
  */
+/** True when Lemonade is on this machine, by LEMONADE_BASE_URL. */
+async function isLocal($: $): Promise<boolean> {
+  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/i.test(await baseUrl($))
+}
+
 async function serverExe($: $): Promise<string | null> {
   if ((await $.env.get('LEMONCLAUDE_AUTOSTART')) === '0') return null
-  if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/i.test(await baseUrl($))) return null
+  if (!(await isLocal($))) return null
   const appData = await $.env.get('LOCALAPPDATA')
   if (!appData) return null
   const exe = `${appData}\\lemonade_server\\bin\\LemonadeServer.exe`

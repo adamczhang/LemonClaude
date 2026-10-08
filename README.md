@@ -150,7 +150,7 @@ LemonClaude shares Lemonade Server with whatever else uses it, such as the Lemon
 
 To run two chat models at once, raise `max_loaded_models` in Lemonade's settings. That's your call, so LemonClaude never changes it.
 
-Another program, such as a second Lemonade server, can also hold GPU memory that this server can't see. Then a load fails instead of getting a clean conflict. LemonClaude says so: "Not enough GPU memory: another app may be using it." It suggests freeing some, lowering `LEMONCLAUDE_CTX_SIZE`, or picking a smaller model.
+Another program, such as a second Lemonade server, can also hold GPU memory that this server can't see. On Windows a load into a full GPU doesn't fail. llama.cpp puts some layers in system RAM, or Windows pages GPU memory there, and the model answers slowly. So after each load, LemonClaude reads Windows' per-process GPU counters for the process that runs the model. If much of the model is in system memory, it says so: "About 1.5 GB of it is in system memory because the GPU is full, so it will be slow." Integrated GPUs, which borrow system memory by design, are left out. LemonClaude checks only when it loads. If another program on the GPU gets busy later, Windows swaps the two in and out, and both slow down. On other systems a load into a full GPU can fail outright, and LemonClaude then says "Not enough GPU memory: another app may be using it." Either way it suggests freeing GPU memory, lowering `LEMONCLAUDE_CTX_SIZE`, or picking a smaller model.
 
 ## How it works
 
@@ -188,7 +188,7 @@ Another program, such as a second Lemonade server, can also hold GPU memory that
 | "Lemonade Server didn't answer … within 60 s of starting" | Start Lemonade Server from the Start menu and check it runs. Its tray icon opens the logs |
 | The first reply is slow | Loading a model takes a few seconds, and its first answer can take 20 seconds or more. `/lemonade on` loads before you ask anything |
 | "Another app has pinned Lemonade's chat models (…)" | Another app holds Lemonade's chat slot. Unload its model there, raise `max_loaded_models` in Lemonade's settings, or pick a Claude model |
-| "Not enough GPU memory" | Another program holds GPU memory. Free some, lower `LEMONCLAUDE_CTX_SIZE`, or pick a smaller model |
+| "Not enough GPU memory", or "… is in system memory because the GPU is full" | Another program holds GPU memory. Free some, lower `LEMONCLAUDE_CTX_SIZE`, or pick a smaller model |
 | "… isn't downloaded" | Download the model from `/lemonade` first. LemonClaude never downloads a model just by loading it |
 | Tools fail or the model ignores them | Pick a model labeled `tool-calling` (the model manager shows `tools`) |
 | Requests still go to Lemonade after removing the mod | Start a new session, or unset `ANTHROPIC_BASE_URL` in that shell |

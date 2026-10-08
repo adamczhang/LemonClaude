@@ -14,7 +14,7 @@ const MODELS = [
   { id: 'FLM-Chat', size: 1, downloaded: false, suggested: true, recipe: 'flm', labels: ['chat'] },
 ]
 /** A model in Lemonade's memory, as /api/v1/health lists it. */
-type Loaded = { model_name: string; type: string; pinned: boolean; recipe_options: { ctx_size: number } }
+type Loaded = { model_name: string; type: string; pinned: boolean; recipe_options: { ctx_size: number }; pid?: number }
 // What this machine can run, as /api/v1/system-info judges it: no NPU for FastFlowLM.
 const SYSTEM = {
   recipes: {
@@ -37,6 +37,8 @@ type Lemonade = {
   pullError?: string
   /** Lemonade fails each load with this error. */
   loadError?: string
+  /** What Windows' GPU counters say about each model's server process, as PowerShell prints it. */
+  gpu?: string
   /** Each request that went out through curl, as `METHOD /path`. */
   curled: string[]
   /** What Lemonade has in memory: one chat slot, as max_loaded_models 1 gives. */
@@ -133,7 +135,13 @@ function world(
       if (lemonade.loadError) return { status: 500, text: JSON.stringify({ error: { message: lemonade.loadError } }) }
       const known = lemonade.models.find(m => m.id === load.model_name)
       if (!known) return { status: 404, text: JSON.stringify({ error: { message: `model '${load.model_name}' not found` } }) }
-      const loaded = { model_name: load.model_name, type: 'llm', pinned: load.pinned === true, recipe_options: { ctx_size: load.ctx_size ?? 262144 } }
+      const loaded = {
+        model_name: load.model_name,
+        type: 'llm',
+        pinned: load.pinned === true,
+        recipe_options: { ctx_size: load.ctx_size ?? 262144 },
+        pid: 4242,
+      }
       const here = lemonade.loaded.findIndex(m => m.model_name === load.model_name)
       if (here >= 0) lemonade.loaded[here] = loaded
       else {
@@ -169,6 +177,11 @@ function world(
   }
 
   on('process.run', async ($, e) => {
+    // Windows' GPU memory counters: the readings the test set, or none.
+    if (e.argv[0] === 'powershell.exe' && (e.init?.stdin ?? '').includes('GPU Process Memory')) {
+      const reading = lemonade.gpu
+      return { value: { exitCode: reading ? 0 : 1, stdout: reading ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     // curl: the way to Lemonade while Claude Code refuses a plugin's own requests.
     if (e.argv[0] === 'curl') {
       const url = e.argv.at(-1)!
@@ -465,6 +478,26 @@ describe('model manager', () => {
   })
 })
 
+/**
+ * What Windows' GPU counters say about the model server process 4242, as PowerShell prints it, in
+ * MB: what it holds on the RTX of its own and borrowed, and what it holds on the integrated Radeon,
+ * then each GPU's own memory size from the registry (8 GB and 512 MB).
+ */
+function gpu(rtxDedicated: number, rtxShared: number, radeonDedicated = 0, radeonShared = 0): string {
+  const mb = 1024 * 1024
+  const b = String.fromCharCode(92)
+  const line = (luid: string, kind: string, value: number) =>
+    `process|${b}${b}host${b}gpu process memory(pid_4242_luid_0x00000000_0x${luid}_phys_0)${b}${kind} usage|${value * mb}`
+  return [
+    line('0001d6f4', 'dedicated', rtxDedicated),
+    line('0001d6f4', 'shared', rtxShared),
+    line('00014de1', 'dedicated', radeonDedicated),
+    line('00014de1', 'shared', radeonShared),
+    `adapter|luid_0x00000000_0x0001d6f4|${8192 * mb}`,
+    `adapter|luid_0x00000000_0x00014de1|${512 * mb}`,
+  ].join(String.fromCharCode(13, 10))
+}
+
 const WINDOWS = { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' }
 const EXE = 'C:\\Users\\me\\AppData\\Local\\lemonade_server\\bin\\LemonadeServer.exe'
 
@@ -739,7 +772,7 @@ describe('sharing Lemonade', () => {
     session.model = 'Gemma-Chat-GGUF'
     await step($, session.model)
     expect(server.loads).toEqual([{ model_name: 'Gemma-Chat-GGUF', ctx_size: 65536, pinned: true }])
-    expect(server.loaded).toEqual([{ model_name: 'Gemma-Chat-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 65536 } }])
+    expect(server.loaded).toEqual([{ model_name: 'Gemma-Chat-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 65536 }, pid: 4242 }])
     expect(asked).toEqual(['Gemma-Chat-GGUF @ http://127.0.0.1:13305'])
     // Qwen was unpinned and nobody's LemonClaude knew: it made room, and the toast says so.
     expect(toasts.some(t => t.includes('Loaded Gemma-Chat-GGUF with a 64K window. Lemonade unloaded Qwen3.5-4B-GGUF to make room.'))).toBe(true)
@@ -811,7 +844,7 @@ describe('sharing Lemonade', () => {
     await lemonade($, 'on gemma')
     await step($)
     expect(asked).toEqual(['Qwen3.5-4B-GGUF @ http://127.0.0.1:13305', 'Gemma-Chat-GGUF @ http://127.0.0.1:13305'])
-    expect(server.loaded).toEqual([{ model_name: 'Gemma-Chat-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 65536 } }])
+    expect(server.loaded).toEqual([{ model_name: 'Gemma-Chat-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 65536 }, pid: 4242 }])
     expect(session.model).toBe('claude-opus-5-5')
   })
 
@@ -831,6 +864,63 @@ describe('sharing Lemonade', () => {
     session.model = 'claude-opus-5-5'
     await step($)
     expect(server.pins).toEqual([])
+  })
+
+  test('a model that fit says nothing more', async ($, on) => {
+    const { toasts, session, lemonade: server } = world(on, WINDOWS)
+    server.loaded = []
+    server.gpu = gpu(2400, 150)
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(toasts.some(t => t.includes('Loaded Gemma-Chat-GGUF with a 64K window.'))).toBe(true)
+    expect(toasts.some(t => t.includes('system memory'))).toBe(false)
+  })
+
+  test('a model Windows paged partly into system memory says it will be slow', async ($, on) => {
+    const { toasts, session, lemonade: server } = world(on, WINDOWS)
+    server.loaded = []
+    // As seen live with another server busy on the RTX: half the model's memory was borrowed.
+    server.gpu = gpu(3008, 3150)
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(
+      toasts.some(t =>
+        t.includes('About 3.1 GB of it is in system memory because the GPU is full, so it will be slow. Free GPU memory, lower LEMONCLAUDE_CTX_SIZE, or pick a smaller model.'),
+      ),
+    ).toBe(true)
+  })
+
+  test('a model llama.cpp fit partly into system RAM says so too', async ($, on) => {
+    const { toasts, session, lemonade: server } = world(on, WINDOWS)
+    server.loaded = []
+    // Gemma is 2.1 GB, but its process holds only 600 MB on the GPU.
+    server.gpu = gpu(600, 150)
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(toasts.some(t => t.includes('About 1.5 GB of it is in system memory because the GPU is full'))).toBe(true)
+  })
+
+  test('an integrated GPU, which borrows memory by design, says nothing', async ($, on) => {
+    const { toasts, session, lemonade: server } = world(on, WINDOWS)
+    server.loaded = []
+    server.gpu = gpu(0, 0, 300, 3000)
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(toasts.some(t => t.includes('system memory'))).toBe(false)
+  })
+
+  test('counters it cannot read say nothing', async ($, on) => {
+    const { toasts, session, lemonade: server } = world(on, WINDOWS)
+    server.loaded = []
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(toasts.some(t => t.includes('system memory'))).toBe(false)
+    expect(toasts.some(t => t.includes('Loaded Gemma-Chat-GGUF with a 64K window.'))).toBe(true)
   })
 
   test('a load that runs out of GPU memory says so, and how to make room', async ($, on) => {

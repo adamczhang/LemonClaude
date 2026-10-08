@@ -861,6 +861,31 @@ describe('sharing Lemonade', () => {
     expect(server.pins).toEqual([])
   })
 
+  test('a collection is loaded once, though /health lists only its components', async ($, on) => {
+    const { session, lemonade: server } = world(on)
+    server.models.push({ id: 'Omni-Collection', size: 9, downloaded: true, suggested: true, recipe: 'collection.omni', labels: ['chat'] })
+    await start($)
+    session.model = 'Omni-Collection'
+    await step($, session.model)
+    // As Lemonade does: the collection's components are what's loaded.
+    server.loaded = [{ model_name: 'Omni-Part-GGUF', type: 'llm', pinned: false, recipe_options: { ctx_size: 65536 } }]
+    await step($, session.model)
+    await step($, session.model)
+    expect(server.loads.filter(l => l.model_name === 'Omni-Collection')).toHaveLength(1)
+  })
+
+  test('a model downloaded since the catalog was read is loaded, not refused', async ($, on) => {
+    const { session, toasts, lemonade: server } = world(on)
+    await start($)
+    await lemonade($, '')
+    server.models.find(m => m.id === 'Not-Pulled-GGUF')!.downloaded = true
+    server.loaded = []
+    await lemonade($, 'on Not-Pulled')
+    expect(server.loads.map(l => l.model_name)).toEqual(['Not-Pulled-GGUF'])
+    expect(toasts.some(t => t.includes("isn't downloaded"))).toBe(false)
+    expect(session.model).toBe('claude-opus-5-5')
+  })
+
   test("a pin a crashed session left an hour ago is given back at the next start", async ($, on) => {
     const { lemonade: server } = world(on, {}, { store: { pinned: { 'Qwen3.5-4B-GGUF': Date.now() - 2 * 60 * 60 * 1000 } } })
     server.loaded[0]!.pinned = true

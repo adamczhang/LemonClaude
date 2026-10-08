@@ -331,6 +331,7 @@ async function setPin($: $, base: string, model: string, pinned: boolean): Promi
 
 /** Unpins `model` if LemonClaude pinned it. It stays loaded, warm for whoever wants it next. */
 async function release($: $, model: string): Promise<void> {
+  collections.delete(model)
   if (!(model in (await ours($)))) return
   await setPin($, await baseUrl($), model, false)
   await remember($, model, false)
@@ -341,6 +342,10 @@ type LoadOutcome = { ok: boolean; message?: string }
 
 // One load per model at a time: a main step and its subagents' steps arrive together.
 const loading = new Map<string, Promise<LoadOutcome>>()
+
+// Collections LemonClaude loaded. /health lists a collection's components, never the collection, so
+// without this every step would load it again. A failed request forgets it, so the next one reloads.
+const collections = new Set<string>()
 
 /**
  * Makes `model` ready for requests, the way an app sharing Lemonade should: loads it explicitly with
@@ -367,6 +372,7 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
   if (before === null) return { ok: false }
   const mineBefore = await ours($)
 
+  if (collections.has(model)) return { ok: true }
   const here = before.find(m => m.model_name === model)
   if (here) {
     // Loaded already: pin it, never load it again, which would reload it with another window.
@@ -376,7 +382,9 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
   }
 
   // Loading a model Lemonade hasn't downloaded would download it, gigabytes: never do that unasked.
-  if (!(await read($, catalog)).some(m => m.id === model)) await refresh($)
+  // A catalog fetched earlier can miss a model downloaded since: look again before saying no.
+  const listed = (await read($, catalog)).find(m => m.id === model)
+  if (!listed?.isDownloaded) await refresh($)
   const known = (await read($, catalog)).find(m => m.id === model)
   if (!known) return { ok: false, message: `Lemonade lists no model named ${model}.` }
   if (!known.isDownloaded) return { ok: false, message: `${model} isn't downloaded. Download it from /lemonade first.` }
@@ -411,6 +419,7 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
   }
 
   await remember($, model, true)
+  if (known.recipe.startsWith('collection.')) collections.add(model)
   const after = (await loadedNow($, base)) ?? []
   // Another app's model that made room: unpinned, not LemonClaude's, and gone now.
   const gone = before
@@ -436,7 +445,8 @@ function say($: $, text: string): void {
  * itself, perhaps from a local model of its own, so LemonClaude leaves them untouched.
  */
 async function isOthersAgent($: $, agentId: string): Promise<boolean> {
-  const agent = (await $.agent.list()).find(a => a.id === agentId)
+  // A list that can't be read means no agent known to be another's: the step routes as any other.
+  const agent = (await $.agent.list().catch(() => [])).find(a => a.id === agentId)
   return agent !== undefined && agent.type.includes(':') && !agent.type.startsWith('lemonclaude:')
 }
 
@@ -747,6 +757,8 @@ export const register: Register = on => {
     }
     await route($, model)
     const result = yield* next(model ? { ...e, model } : e)
+    // A collection that didn't answer may have been unloaded: load it again next time.
+    if (model && result.stopReason === null) collections.delete(model)
     // No response from Lemonade is most often a server that isn't running.
     if (model && !hasSaidWhy && result.stopReason === null && !next.signal.aborted) {
       say($, `Lemonade didn't answer at ${await baseUrl($)}. Start Lemonade Server, or pick a Claude model.`)

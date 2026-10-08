@@ -25,7 +25,7 @@ This release brings LemonClaude to the Claude Code desktop app and lets you mana
   - `/lemonade on` loads before switching, says "Loaded … with a 64K window" or exactly why not, and doesn't switch to a model that can't load.
 - Support for `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. With it set, some Claude Code versions (2.1.287) refuse a mod's own network requests, and LemonClaude reaches Lemonade through `curl` instead.
 - A load into a GPU another program has filled, such as a second Lemonade server, says so, and suggests freeing some memory, a smaller window or a smaller model.
-  - On Windows, where such a load succeeds and runs slowly, LemonClaude reads Windows' per-process GPU counters for the model's server, and says how much of the model is in system memory.
+  - On Windows, where such a load succeeds and runs slowly, LemonClaude reads Windows' GPU counters for the model's server and its GPU. It says how much of the model is in system memory, or, when the model fits only because Windows paged an idle program out, by how much the GPU is overcommitted.
   - Elsewhere, a load that fails out of memory says so.
 
 ### Changed

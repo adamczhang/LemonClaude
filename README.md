@@ -150,7 +150,12 @@ LemonClaude shares Lemonade Server with whatever else uses it, such as the Lemon
 
 To run two chat models at once, raise `max_loaded_models` in Lemonade's settings. That's your call, so LemonClaude never changes it.
 
-Another program, such as a second Lemonade server, can also hold GPU memory that this server can't see. On Windows a load into a full GPU doesn't fail. llama.cpp puts some layers in system RAM, or Windows pages GPU memory there, and the model answers slowly. So after each load, LemonClaude reads Windows' per-process GPU counters for the process that runs the model. If much of the model is in system memory, it says so: "About 1.5 GB of it is in system memory because the GPU is full, so it will be slow." Integrated GPUs, which borrow system memory by design, are left out. LemonClaude checks only when it loads. If another program on the GPU gets busy later, Windows swaps the two in and out, and both slow down. On other systems a load into a full GPU can fail outright, and LemonClaude then says "Not enough GPU memory: another app may be using it." Either way it suggests freeing GPU memory, lowering `LEMONCLAUDE_CTX_SIZE`, or picking a smaller model.
+Another program, such as a second Lemonade server, can also hold GPU memory that this server can't see. On Windows a load into a full GPU doesn't fail. llama.cpp puts some layers in system RAM, or Windows pages GPU memory there, and the model answers slowly. So after each load, LemonClaude reads Windows' GPU counters for the process that runs the model and for its GPU:
+
+- If much of the model is in system memory already, it says so: "About 1.5 GB of it is in system memory because the GPU is full, so it will be slow."
+- If the model fits only because Windows paged an idle program out to make room, it says the GPU is overcommitted. That's when everything committed to the GPU is more than it has. When the programs on it are busy at once, Windows swaps them through system memory and they slow down.
+
+Integrated GPUs, which borrow system memory by design, are left out. On other systems a load into a full GPU can fail outright, and LemonClaude then says "Not enough GPU memory: another app may be using it." Either way it suggests freeing GPU memory, lowering `LEMONCLAUDE_CTX_SIZE`, or picking a smaller model.
 
 ## How it works
 

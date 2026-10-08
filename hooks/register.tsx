@@ -341,27 +341,37 @@ const GB = 1024 ** 3
 const MB = 1024 ** 2
 
 /**
- * How much of the model a Lemonade backend process (`pid`) runs sits in system memory because its GPU
- * is full, in bytes, or 0. Windows never fails such a load: llama.cpp puts layers in system RAM, or
- * Windows pages the process's GPU memory there, and the model answers slowly. Windows' per-process
- * GPU counters say what this process holds on each GPU, its own memory and memory it borrows; whole-
- * GPU totals can't, since Windows pages an idle program out to let a busy one in. The process spilled
- * when it borrows over 512 MB (a backend's staging buffers take 100-350 MB), or when it holds under
- * 60% of the model's size on a GPU at all. A GPU with under 2 GB of its own, an integrated one that
- * borrows by design, says nothing. Null-free: anything unreadable (not Windows, counters under another
- * language's names) is 0.
+ * Whether the model a Lemonade backend process (`pid`) runs fits its GPU, on Windows, where a load into
+ * a full GPU never fails: llama.cpp puts layers in system RAM, or Windows pages GPU memory there, and
+ * models answer slowly.
+ *
+ * - `now`: this process has so much in system memory already, in bytes. Per-process counters say what
+ *   it holds on each GPU, its own memory and memory it borrows: it spilled when it borrows over 512 MB
+ *   (a backend's staging buffers take 100-350 MB), or holds under 60% of the model's size on a GPU.
+ * - `soon`: it fits for now, but everything committed to its GPU (Total Committed, which counts a
+ *   paged-out idle program at full size) is so much more than the GPU has, in bytes. Windows paged an
+ *   idle program out to let this one in; when both are busy, they swap through system memory.
+ *
+ * A GPU with under 2 GB of its own, an integrated one that borrows by design, says nothing; so does
+ * anything unreadable (not Windows, counters under another language's names).
  */
-async function spilled($: $, pid: number, sizeGb: number | undefined): Promise<number> {
-  if (!(await $.env.get('LOCALAPPDATA'))) return 0
+async function spilled(
+  $: $,
+  pid: number,
+  sizeGb: number | undefined,
+): Promise<{ kind: 'now' | 'soon'; bytes: number } | null> {
+  if (!(await $.env.get('LOCALAPPDATA'))) return null
   const script = String.raw`$owner = ${pid}
 (Get-Counter '\GPU Process Memory(*)\Dedicated Usage','\GPU Process Memory(*)\Shared Usage' -ErrorAction SilentlyContinue).CounterSamples | Where-Object { $_.Path -match "pid_$($owner)_" } | ForEach-Object { 'process|' + $_.Path + '|' + [int64]$_.CookedValue }
+(Get-Counter '\GPU Adapter Memory(*)\Total Committed' -ErrorAction SilentlyContinue).CounterSamples | ForEach-Object { 'committed|' + $_.Path + '|' + [int64]$_.CookedValue }
 Get-ChildItem HKLM:\SOFTWARE\Microsoft\DirectX -ErrorAction SilentlyContinue | ForEach-Object { $a = Get-ItemProperty $_.PSPath; if ($a.AdapterLuid) { 'adapter|luid_0x{0:x8}_0x{1:x8}|{2}' -f ($a.AdapterLuid -shr 32), ($a.AdapterLuid -band 0xffffffff), [int64]$a.DedicatedVideoMemory } }`
   const ran = await $.process
     .run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', '-'], { stdin: `${script}\n`, timeoutMs: 15_000 })
     .catch(() => undefined)
-  if (!ran || ran.exitCode !== 0) return 0
+  if (!ran || ran.exitCode !== 0) return null
   const held = new Map<string, { dedicated: number; shared: number }>()
   const own = new Map<string, number>()
+  const committed = new Map<string, number>()
   for (const line of ran.stdout.split(/\r?\n/)) {
     const usage = /pid_\d+_(luid_0x[0-9a-f]+_0x[0-9a-f]+)_phys_\d+\)\\(dedicated|shared) usage\|(\d+)/i.exec(line)
     if (usage) {
@@ -371,16 +381,22 @@ Get-ChildItem HKLM:\SOFTWARE\Microsoft\DirectX -ErrorAction SilentlyContinue | F
     }
     const adapter = /^adapter\|(luid_0x[0-9a-f]+_0x[0-9a-f]+)\|(\d+)/i.exec(line)
     if (adapter) own.set(adapter[1]!, Number(adapter[2]))
+    const total = /^committed\|.*\((luid_0x[0-9a-f]+_0x[0-9a-f]+)_phys_\d+\)\\total committed\|(\d+)/i.exec(line)
+    if (total) committed.set(total[1]!, (committed.get(total[1]!) ?? 0) + Number(total[2]))
   }
   // The GPU this process uses most.
   let gpu: { adapter: string; dedicated: number; shared: number } | undefined
   for (const [adapter, on] of held) {
     if (!gpu || on.dedicated + on.shared > gpu.dedicated + gpu.shared) gpu = { adapter, ...on }
   }
-  if (!gpu || gpu.dedicated + gpu.shared < 256 * MB || (own.get(gpu.adapter) ?? 0) < 2 * GB) return 0
-  if (gpu.shared > 512 * MB) return gpu.shared
+  const card = gpu ? (own.get(gpu.adapter) ?? 0) : 0
+  if (!gpu || gpu.dedicated + gpu.shared < 256 * MB || card < 2 * GB) return null
+  if (gpu.shared > 512 * MB) return { kind: 'now', bytes: gpu.shared }
   const size = (sizeGb ?? 0) * GB
-  return size > 0 && gpu.dedicated < 0.6 * size ? size - gpu.dedicated : 0
+  if (size > 0 && gpu.dedicated < 0.6 * size) return { kind: 'now', bytes: size - gpu.dedicated }
+  // Every backend commits about 100 MB of staging buffers outside the card: allow some slack.
+  const over = (committed.get(gpu.adapter) ?? 0) - card
+  return over > 256 * MB ? { kind: 'soon', bytes: over } : null
 }
 
 /** How loading a model for requests went: ready or not, and what to tell the person. */
@@ -482,12 +498,16 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
   const room = gone.length > 0 ? ` Lemonade unloaded ${gone.join(', ')} to make room.` : ''
   // Whether it fit: the process that runs it, on this machine, measured on Windows.
   const pid = after.find(m => m.model_name === model)?.pid
-  const outside = pid && (await isLocal($)) ? await spilled($, pid, known.size) : 0
+  const fit = pid && (await isLocal($)) ? await spilled($, pid, known.size) : null
+  const gb = fit ? (fit.bytes / GB).toFixed(1) : ''
+  const remedy = 'Free GPU memory, lower LEMONCLAUDE_CTX_SIZE, or pick a smaller model.'
   const slow =
-    outside > 0
-      ? ` About ${(outside / GB).toFixed(1)} GB of it is in system memory because the GPU is full, so it will be slow. ` +
-        `Free GPU memory, lower LEMONCLAUDE_CTX_SIZE, or pick a smaller model.`
-      : ''
+    fit?.kind === 'now'
+      ? ` About ${gb} GB of it is in system memory because the GPU is full, so it will be slow. ${remedy}`
+      : fit?.kind === 'soon'
+        ? ` The GPU is overcommitted by about ${gb} GB: when the programs on it are busy at once, Windows swaps them ` +
+          `through system memory, and this model will be slow. ${remedy}`
+        : ''
   return { ok: true, message: `Loaded ${model} with a ${windowName(ctx)} window.${room}${slow}` }
 }
 

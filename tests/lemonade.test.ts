@@ -483,7 +483,7 @@ describe('model manager', () => {
  * MB: what it holds on the RTX of its own and borrowed, and what it holds on the integrated Radeon,
  * then each GPU's own memory size from the registry (8 GB and 512 MB).
  */
-function gpu(rtxDedicated: number, rtxShared: number, radeonDedicated = 0, radeonShared = 0): string {
+function gpu(rtxDedicated: number, rtxShared: number, radeonDedicated = 0, radeonShared = 0, rtxCommitted = rtxDedicated + rtxShared): string {
   const mb = 1024 * 1024
   const b = String.fromCharCode(92)
   const line = (luid: string, kind: string, value: number) =>
@@ -493,6 +493,8 @@ function gpu(rtxDedicated: number, rtxShared: number, radeonDedicated = 0, radeo
     line('0001d6f4', 'shared', rtxShared),
     line('00014de1', 'dedicated', radeonDedicated),
     line('00014de1', 'shared', radeonShared),
+    `committed|${b}${b}host${b}gpu adapter memory(luid_0x00000000_0x0001d6f4_phys_0)${b}total committed|${rtxCommitted * mb}`,
+    `committed|${b}${b}host${b}gpu adapter memory(luid_0x00000000_0x00014de1_phys_0)${b}total committed|${(radeonDedicated + radeonShared) * mb}`,
     `adapter|luid_0x00000000_0x0001d6f4|${8192 * mb}`,
     `adapter|luid_0x00000000_0x00014de1|${512 * mb}`,
   ].join(String.fromCharCode(13, 10))
@@ -901,6 +903,34 @@ describe('sharing Lemonade', () => {
     session.model = 'Gemma-Chat-GGUF'
     await step($, session.model)
     expect(toasts.some(t => t.includes('About 1.5 GB of it is in system memory because the GPU is full'))).toBe(true)
+  })
+
+  test('a model that fits only because Windows paged an idle program out says the GPU is overcommitted', async ($, on) => {
+    const { toasts, session, lemonade: server } = world(on, WINDOWS)
+    server.loaded = []
+    // As seen live: the new model got 6 GB of the RTX's own memory, but an idle server's 13.4 GB is
+    // still committed to the card, which has 8.
+    server.gpu = gpu(6002, 154, 0, 0, 6157 + 13400)
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(
+      toasts.some(t =>
+        t.includes(
+          'The GPU is overcommitted by about 11.1 GB: when the programs on it are busy at once, Windows swaps them through system memory, and this model will be slow.',
+        ),
+      ),
+    ).toBe(true)
+  })
+
+  test('staging buffers a little over the card are not overcommitment', async ($, on) => {
+    const { toasts, session, lemonade: server } = world(on, WINDOWS)
+    server.loaded = []
+    server.gpu = gpu(8000, 150, 0, 0, 8192 + 200)
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(toasts.some(t => t.includes('overcommitted') || t.includes('system memory'))).toBe(false)
   })
 
   test('an integrated GPU, which borrows memory by design, says nothing', async ($, on) => {

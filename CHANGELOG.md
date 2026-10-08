@@ -10,6 +10,10 @@ All notable changes to LemonClaude are listed here. The format follows [Keep a C
 - The selector entry says "starts when picked" while Lemonade is down and LemonClaude can start it.
 - `/lemonade on [model]` sends every request to the offered Lemonade model, whatever the model selector shows, and `/lemonade off` hands routing back to the selector. This is how to use Lemonade from the desktop app, whose model picker lists only Claude models. Ending the session turns it off.
 
+### Changed
+
+- `/lemonade` opens a model manager in the transcript, laid out like Lemonade's own: search, Downloaded only, active models, and every chat model Lemonade suggests, grouped by recipe. **Use** switches to a downloaded model. **Download** starts a download that Lemonade runs itself, with progress in the row. It replaces the picker pane, which the desktop app didn't show.
+
 ## [0.1.0] - 2026-10-07
 
 First release.

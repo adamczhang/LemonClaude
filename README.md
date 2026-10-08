@@ -56,12 +56,24 @@ First, download a chat model with Lemonade, for example with `lemonade pull`. On
 
 ### In the desktop app
 
-The desktop app's model picker lists only Claude models, so the 🍋 entry doesn't appear there. Use commands instead:
+The desktop app's model picker lists only Claude models, so the 🍋 entry doesn't appear there. Use LemonClaude's model manager or its commands instead:
 
-1. Type `/lemonade on`. Every request now goes to the Lemonade model, subagents included, and the status line shows `🍋 <model> (Lemonade)`. The picker keeps showing the Claude model it had.
-2. Type `/lemonade off` to go back to that Claude model.
+1. Type `/lemonade` to open the model manager (below) and press **Use** on a model. Or type `/lemonade on` to use the offered model. Every request now goes to Lemonade, subagents included, and the status line shows `🍋 <model> (Lemonade)`. The picker keeps showing the Claude model it had.
+2. Press **Back to Claude**, or type `/lemonade off`, to go back to that Claude model.
 
-`/lemonade on` and `/lemonade off` work in the terminal too.
+These work in the terminal too.
+
+### The model manager
+
+Bare `/lemonade` draws a model list in the transcript, laid out like the Model Manager in Lemonade's own app:
+
+- **Search** box and a **Downloaded only** switch.
+- **Active models:** the models Lemonade has loaded in memory, marked with a green dot.
+- **Suggested models:** every chat model Lemonade lists, grouped by recipe as Lemonade groups them (Llama.cpp GPU, Ryzen AI LLM, …). Press a group to open it. Each row shows the model's size and tags such as `tools`, `vision` and `reasoning`.
+- **Use** switches requests to a downloaded model, as `/lemonade on <model>` does.
+- **Download** asks Lemonade to download a model. Lemonade runs the download itself, so it keeps going if you close the session, and the row shows its progress. When it finishes, the row offers **Use**.
+
+The list shows only chat models, the ones Claude Code can talk to. Lemonade's speech, image, music and embedding models stay in Lemonade's app.
 
 ### Commands
 
@@ -72,7 +84,7 @@ Claude Code allows only one custom entry in the selector. LemonClaude offers the
 | `/lemonade on` | Sends every request to the offered Lemonade model, whatever the model selector shows |
 | `/lemonade on <model>` | Offers that model and switches to it |
 | `/lemonade off` | Requests follow the model selector again |
-| `/lemonade` | Opens a picker of downloaded chat models, showing size, tool support and whether each is loaded |
+| `/lemonade` | Opens the model manager: every Lemonade chat model, to use or download |
 | `/lemonade <model>` | Offers that model. It takes the exact id or any unique part of it, such as `/lemonade qwen` |
 | `/lemonade list` | Lists the models, what the selector offers, and where requests go now |
 
@@ -108,7 +120,8 @@ Either way, if Lemonade still doesn't answer, a toast says so and suggests picki
 
 ## Known limitations
 
-- **Desktop model picker:** the desktop app's picker lists only Claude models and doesn't show the 🍋 entry. Use `/lemonade on`. While it's on, the picker still names a Claude model.
+- **Desktop model picker:** the desktop app's picker lists only Claude models and doesn't show the 🍋 entry. Use `/lemonade` or `/lemonade on`. While requests go to Lemonade, the picker still names a Claude model.
+- **Download size:** the model manager shows each model's size but doesn't check free disk space. Lemonade reports an error if a download fails.
 - **Disabling the mod:** pick a Claude model, or run `/lemonade off`, before you disable LemonClaude. Otherwise the environment keeps pointing at Lemonade until the session ends.
 - **Selector refresh:** `/lemonade <model>` updates the entry at once, but a selector that caches its list may show the change only in a new session. `/model <id>` works right away.
 - **Starting Lemonade:** only on Windows, and only with Lemonade Server installed by its Windows installer in `%LOCALAPPDATA%\lemonade_server`. LemonClaude never stops the server it starts.

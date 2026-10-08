@@ -1,9 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { LemonadeModel, SavedEnv } from '../types'
+import type { DownloadState, LemonadeModel, SavedEnv } from '../types'
 
-const PANE = 'lemonade-picker'
 const DEFAULT_BASE_URL = 'http://127.0.0.1:13305'
 const DEFAULT_MODEL = 'Qwen3.5-4B-GGUF'
 const START_TIMEOUT_S = 60
@@ -14,26 +13,45 @@ const saved = atom({ plugin: 'lemonclaude', key: 'saved' } as const, null as Sav
 const models = atom({ plugin: 'lemonclaude', key: 'models' } as const, [] as LemonadeModel[])
 const notice = atom({ plugin: 'lemonclaude', key: 'notice' } as const, '')
 const isOn = atom({ plugin: 'lemonclaude', key: 'isOn' } as const, false)
+const catalog = atom({ plugin: 'lemonclaude', key: 'catalog' } as const, [] as LemonadeModel[])
+const downloads = atom({ plugin: 'lemonclaude', key: 'downloads' } as const, {} as Record<string, DownloadState>)
+const search = atom({ plugin: 'lemonclaude', key: 'search' } as const, '')
+const isDownloadedOnly = atom({ plugin: 'lemonclaude', key: 'isDownloadedOnly' } as const, false)
+const expanded = atom({ plugin: 'lemonclaude', key: 'expanded' } as const, [] as string[])
 
 type $ = EngineInterface
 
-// Labels Lemonade gives models that are not chat LLMs.
+// Labels Lemonade gives models that are not chat LLMs, even alongside `chat`.
 const NOT_CHAT = ['transcription', 'realtime-transcription', 'image', 'tts', 'embeddings', 'reranking', 'classification']
+
+// Lemonade's own names for its recipes, as its model manager groups them.
+const RECIPES: Record<string, string> = {
+  'collection.omni': 'Lemonade',
+  flm: 'FastFlowLM NPU',
+  llamacpp: 'Llama.cpp GPU',
+  onnxruntime: 'ONNX Runtime',
+  'ryzenai-llm': 'Ryzen AI LLM',
+}
 
 async function baseUrl($: $): Promise<string> {
   const fromEnv = await $.env.get('LEMONADE_BASE_URL')
   return (fromEnv ?? DEFAULT_BASE_URL).replace(/\/+$/, '')
 }
 
-/** Lemonade's downloaded chat models, tool-calling ones first; throws when the server is unreachable. */
-export async function listModels($: $, base: string): Promise<LemonadeModel[]> {
-  const listed = await $.http.fetch(`${base}/api/v1/models`)
+/**
+ * Lemonade's chat models, downloaded or suggested, by name; throws when the server is unreachable.
+ * Models without the `chat` label (speech, images, music) are no use to Claude Code.
+ */
+export async function listCatalog($: $, base: string): Promise<LemonadeModel[]> {
+  const listed = await $.http.fetch(`${base}/api/v1/models?show_all=true`)
   if (!listed.ok) throw new Error(`Lemonade answered ${listed.status} at ${base}/api/v1/models`)
   const data = (JSON.parse(listed.text).data ?? []) as Array<{
     id: string
     size?: number
     labels?: string[]
+    recipe?: string
     downloaded?: boolean
+    suggested?: boolean
   }>
 
   let loaded = new Set<string>()
@@ -44,23 +62,32 @@ export async function listModels($: $, base: string): Promise<LemonadeModel[]> {
   }
 
   return data
-    .filter(m => m.downloaded !== false)
-    .filter(m => !(m.labels ?? []).some(l => NOT_CHAT.includes(l)))
+    .filter(m => (m.labels ?? []).includes('chat') && !(m.labels ?? []).some(l => NOT_CHAT.includes(l)))
+    .filter(m => m.downloaded !== false || m.suggested !== false)
     .map(m => ({
       id: m.id,
       size: m.size,
       labels: m.labels ?? [],
+      recipe: m.recipe ?? '',
+      isDownloaded: m.downloaded !== false,
       hasTools: (m.labels ?? []).includes('tool-calling'),
       isLoaded: loaded.has(m.id),
     }))
-    .sort((a, b) => Number(b.hasTools) - Number(a.hasTools) || a.id.localeCompare(b.id))
+    .sort((a, b) => a.id.localeCompare(b.id, undefined, { sensitivity: 'base' }))
 }
 
-/** Refreshes the model list; on failure keeps the last one and says why. */
+/**
+ * Refreshes the catalog and the downloaded models in it, tool-calling ones first; on failure keeps
+ * the last ones and says why.
+ */
 async function refresh($: $): Promise<LemonadeModel[]> {
   const base = await baseUrl($)
   try {
-    const list = await listModels($, base)
+    const all = await listCatalog($, base)
+    const list = all
+      .filter(m => m.isDownloaded)
+      .sort((a, b) => Number(b.hasTools) - Number(a.hasTools) || a.id.localeCompare(b.id))
+    await update($, catalog, () => all)
     await update($, models, () => list)
     await update($, notice, () => '')
     return list
@@ -68,6 +95,92 @@ async function refresh($: $): Promise<LemonadeModel[]> {
     await update($, notice, () => `Lemonade isn't reachable at ${base}: ${(err as Error).message}`)
     return read($, models)
   }
+}
+
+/**
+ * Reads Lemonade's server-owned downloads into `downloads` once, and refreshes the lists when one
+ * finished; true while one still runs.
+ */
+async function pollDownloads($: $): Promise<boolean> {
+  const base = await baseUrl($)
+  const listed = await $.http.fetch(`${base}/api/v1/downloads`).catch(() => undefined)
+  if (!listed?.ok) return false
+  const jobs = JSON.parse(listed.text) as Array<{
+    model_name: string
+    status: string
+    running?: boolean
+    percent?: number
+    complete?: boolean
+    error?: string
+  }>
+  const before = await read($, downloads)
+  const now: Record<string, DownloadState> = {}
+  const finished: string[] = []
+  for (const job of jobs) {
+    if (job.complete || job.status === 'completed') {
+      if (before[job.model_name]) finished.push(job.model_name)
+      continue
+    }
+    if (job.status === 'cancelled') continue
+    now[job.model_name] = { percent: job.percent ?? 0, status: job.status, ...(job.error ? { error: job.error } : {}) }
+  }
+  // A download we saw running that is gone from the list finished while nobody looked.
+  for (const [id, d] of Object.entries(before)) {
+    if (d.status === 'downloading' && !(id in now) && !finished.includes(id)) finished.push(id)
+  }
+  await update($, downloads, () => now)
+  if (finished.length > 0) {
+    await refresh($)
+    $.ui.toast(`Downloaded ${finished.join(', ')}. Press Use in /lemonade to switch to it.`)
+  }
+  return jobs.some(j => j.running) || Object.values(now).some(d => d.status === 'downloading')
+}
+
+// One poll at a time while Lemonade downloads; a module variable, so a reload starts it again.
+let poller: { cancel: () => void } | null = null
+
+/** Polls Lemonade's downloads each second until none runs. */
+function watchDownloads($: $): void {
+  if (poller) return
+  poller = $.clock.every(1000, () =>
+    void pollDownloads($).then(isRunning => {
+      if (isRunning) return
+      poller?.cancel()
+      poller = null
+    }),
+  )
+}
+
+function recipeName(recipe: string): string {
+  return RECIPES[recipe] ?? (recipe || 'Other')
+}
+
+/** A size in GB as Lemonade's model manager shows it: MB under a gigabyte. */
+function formatSize(gb?: number): string {
+  if (gb === undefined) return ''
+  return gb < 1 ? `${Math.round(gb * 1000)} MB` : `${gb.toFixed(2)} GB`
+}
+
+function tags(m: LemonadeModel): string {
+  return [m.hasTools ? 'tools' : '', ...['vision', 'reasoning', 'coding'].filter(l => m.labels.includes(l))].filter(Boolean).join(' · ')
+}
+
+/** Starts a server-owned download of `id`, which Lemonade keeps going whatever happens to this session. */
+async function download($: $, id: string): Promise<void> {
+  const base = await baseUrl($)
+  await update($, downloads, d => ({ ...d, [id]: { percent: 0, status: 'downloading' } }))
+  const started = await $.http
+    .fetch(`${base}/api/v1/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_name: id, stream: true, subscribe: false }),
+    })
+    .catch((err: Error) => ({ ok: false, status: 0, text: err.message }))
+  if (!started.ok) {
+    await update($, downloads, d => ({ ...d, [id]: { percent: 0, status: 'error', error: `Lemonade answered ${started.status}` } }))
+    return
+  }
+  watchDownloads($)
 }
 
 async function answers($: $, base: string): Promise<boolean> {
@@ -172,7 +285,7 @@ async function rememberedOffer($: $): Promise<LemonadeModel> {
   const last = (await $.store.get('lastOffer')) as LemonadeModel | undefined
   if (last?.id) return last
   const id = (await $.env.get('LEMONCLAUDE_LEMONADE_MODEL')) ?? DEFAULT_MODEL
-  return { id, labels: [], hasTools: true, isLoaded: false }
+  return { id, labels: [], recipe: '', isDownloaded: true, hasTools: true, isLoaded: false }
 }
 
 async function snapshot($: $): Promise<SavedEnv> {
@@ -298,7 +411,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'lemonade',
-      description: 'Use a local Lemonade model (/lemonade on, /lemonade off, /lemonade <model>, /lemonade list)',
+      description: 'Use a local Lemonade model: /lemonade opens the model list; /lemonade on, off, <model>, list',
     })
 
     // A hot reload keeps $.state: the offer and the routing still stand.
@@ -338,8 +451,9 @@ export const register: Register = on => {
     if (word === 'on') return { text: await switchOn($, rest.join(' ')) }
     if (arg) return { text: await choose($, arg) }
 
+    // Bare, the output row draws as the model manager (the CommandOutput hook); the text is what the model reads.
     await refresh($)
-    await $.ui.open({ id: PANE, title: 'Lemonade model', focus: true, closeOnEscape: true, holdToasts: true })
+    if (await pollDownloads($)) watchDownloads($)
     return { text: await describe($) }
   })
 
@@ -357,33 +471,92 @@ export const register: Register = on => {
     return result
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Select } = $.ui.resolve(e)
-    const list = await read($, models)
-    const shown = await read($, offered)
+  // Bare /lemonade draws its output row as a model manager after Lemonade's own: a row the desktop app
+  // shows, where it places no panes. Its other runs keep their text.
+  on('ui.render', { component: 'CommandOutput', props: { command: 'lemonade' } }, async ($, e, next) => {
+    if (e.props.args.trim() !== '' || e.props.isErrored) return next(e)
+    const { Box, Text, Button, Input } = $.ui.resolve(e)
+    const all = await read($, catalog)
+    const typed = await read($, search)
+    const query = typed.trim().toLowerCase()
+    const onlyDownloaded = await read($, isDownloadedOnly)
+    const open = await read($, expanded)
+    const jobs = await read($, downloads)
+    const now = await read($, routed)
+    const held = await read($, isOn)
     const problem = await read($, notice)
 
-    const pickOne = async (value: string) => {
-      $.ui.toast(await choose($, value))
-      await $.ui.close({ id: PANE })
+    // A handler that says how it went in a toast.
+    const act = (work: () => Promise<string | void>) => () =>
+      void work().then(text => {
+        if (text) $.ui.toast(text)
+      })
+
+    const action = (m: LemonadeModel) => {
+      if (m.id === now) return <Text color="green">In use</Text>
+      if (m.isDownloaded) return <Button key={`use-${m.id}`} label="Use" onPress={act(() => switchOn($, m.id))} />
+      const job = jobs[m.id]
+      if (job?.status === 'downloading' || job?.status === 'paused') {
+        return <Text dimColor>{`${job.status === 'paused' ? 'Paused' : 'Downloading'} ${Math.round(job.percent)}%`}</Text>
+      }
+      const label = job?.status === 'error' ? 'Retry download' : 'Download'
+      return <Button key={`get-${m.id}`} label={label} onPress={act(() => download($, m.id))} />
+    }
+
+    const row = (m: LemonadeModel) => (
+      <Box key={`row-${m.id}`} flexDirection="row" gap={1}>
+        {m.isLoaded ? <Text color="green">●</Text> : <Text dimColor={!m.isDownloaded}>●</Text>}
+        <Text bold={m.isDownloaded}>{m.id}</Text>
+        <Text dimColor>{[formatSize(m.size), tags(m)].filter(Boolean).join(' · ')}</Text>
+        {action(m)}
+      </Box>
+    )
+
+    const shown = all.filter(m => (!onlyDownloaded || m.isDownloaded) && (!query || m.id.toLowerCase().includes(query)))
+    const groups = new Map<string, LemonadeModel[]>()
+    for (const m of shown) groups.set(m.recipe, [...(groups.get(m.recipe) ?? []), m])
+    const recipes = [...groups.keys()].sort((a, b) => recipeName(a).localeCompare(recipeName(b)))
+    const loaded = all.filter(m => m.isLoaded)
+
+    const group = (recipe: string) => {
+      const list = groups.get(recipe)!
+      // A search or the downloaded-only view opens every group it leaves.
+      const isOpen = open.includes(recipe) || query !== '' || onlyDownloaded
+      const toggle = () => void update($, expanded, xs => (xs.includes(recipe) ? xs.filter(x => x !== recipe) : [...xs, recipe]))
+      return (
+        <Box key={`group-box-${recipe}`} flexDirection="column">
+          <Button key={`group-${recipe}`} plain label={`${isOpen ? '▾' : '▸'} ${recipeName(recipe)} (${list.length})`} onPress={toggle} />
+          {isOpen ? <Box flexDirection="column" paddingLeft={2}>{list.map(row)}</Box> : null}
+        </Box>
+      )
     }
 
     return (
       <Box flexDirection="column">
+        <Box flexDirection="row" gap={1}>
+          <Text bold>🍋 Lemonade model manager</Text>
+          <Text dimColor>{now ? `· requests go to ${now}` : '· Claude answers'}</Text>
+          {held ? <Button key="claude" label="Back to Claude" onPress={act(() => switchOff($))} /> : null}
+        </Box>
         {problem ? <Text color="red">{problem}</Text> : null}
-        {list.length === 0 ? (
-          <Text dimColor>No downloaded chat models. Pull one with lemonade pull.</Text>
-        ) : (
-          <Select
-            key="model"
-            label="Offer in the model selector: "
-            options={list.map(m => ({ value: m.id, label: `${m.id}  ${describeModel(m)}` }))}
-            value={shown ?? list[0]!.id}
-            autoFocus
-            onSelect={value => void pickOne(value)}
+        <Box flexDirection="row" gap={1}>
+          <Input
+            key="search"
+            placeholder="Search models..."
+            value={typed}
+            onInput={value => void update($, search, () => value)}
+            onSubmit={value => void update($, search, () => value)}
           />
-        )}
-        <Text dimColor>Enter chooses · Esc closes · then pick 🍋 in the model selector, or /lemonade on</Text>
+          <Button
+            key="downloaded-only"
+            label={onlyDownloaded ? '☑ Downloaded only' : '☐ Downloaded only'}
+            onPress={() => void update($, isDownloadedOnly, x => !x)}
+          />
+        </Box>
+        <Text bold dimColor>{`ACTIVE MODELS · ${loaded.length} loaded`}</Text>
+        {loaded.length > 0 ? <Box flexDirection="column">{loaded.map(row)}</Box> : <Text dimColor>No models loaded</Text>}
+        <Text bold dimColor>{`${onlyDownloaded ? 'DOWNLOADED' : 'SUGGESTED'} MODELS · ${shown.length} shown`}</Text>
+        {recipes.length > 0 ? <Box flexDirection="column">{recipes.map(group)}</Box> : <Text dimColor>No models match.</Text>}
       </Box>
     )
   })

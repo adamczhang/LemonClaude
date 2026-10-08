@@ -2,17 +2,30 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-const MODELS = {
-  data: [
-    { id: 'Qwen3.5-4B-GGUF', size: 3.34, downloaded: true, labels: ['chat', 'vision', 'tool-calling'] },
-    { id: 'Gemma-Chat-GGUF', size: 2.1, downloaded: true, labels: ['chat'] },
-    { id: 'Whisper-Large-v3-Turbo', size: 1.62, downloaded: true, labels: ['transcription'] },
-    { id: 'Not-Pulled-GGUF', size: 9, downloaded: false, labels: ['chat', 'tool-calling'] },
-  ],
-}
+// Lemonade's catalog, as /api/v1/models?show_all=true lists it.
+const MODELS = [
+  { id: 'Qwen3.5-4B-GGUF', size: 3.34, downloaded: true, suggested: true, recipe: 'llamacpp', labels: ['chat', 'vision', 'tool-calling'] },
+  { id: 'Gemma-Chat-GGUF', size: 2.1, downloaded: true, suggested: true, recipe: 'llamacpp', labels: ['chat'] },
+  { id: 'Whisper-Large-v3-Turbo', size: 1.62, downloaded: true, suggested: true, recipe: 'whispercpp', labels: ['transcription'] },
+  { id: 'Not-Pulled-GGUF', size: 9, downloaded: false, suggested: true, recipe: 'llamacpp', labels: ['chat', 'tool-calling'] },
+  { id: 'OLMo-1B-Hybrid', size: 0.65, downloaded: false, suggested: true, recipe: 'ryzenai-llm', labels: ['chat'] },
+  { id: 'Unlisted-GGUF', size: 4, downloaded: false, suggested: false, recipe: 'llamacpp', labels: ['chat'] },
+  { id: 'ACE-Step-Music', size: 10.5, downloaded: false, suggested: true, recipe: 'acestep', labels: ['audio-generation'] },
+]
 const HEALTH = { all_models_loaded: [{ model_name: 'Qwen3.5-4B-GGUF' }] }
 
-type World = { env: Map<string, string>; asked: string[]; session: { model: string }; toasts: string[]; runs: string[][]; stdin: string[] }
+/** Lemonade's side of a world: its catalog, the download jobs /api/v1/downloads lists, and each pull body. */
+type Lemonade = { models: typeof MODELS; jobs: Array<Record<string, unknown>>; pulls: unknown[] }
+
+type World = {
+  env: Map<string, string>
+  asked: string[]
+  session: { model: string }
+  toasts: string[]
+  runs: string[][]
+  stdin: string[]
+  lemonade: Lemonade
+}
 
 /**
  * A fake Lemonade, an in-memory environment and store, a session model the test sets as the
@@ -59,9 +72,20 @@ function world(
     if (!opts.startFails) isUp = true
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
+  const lemonade: Lemonade = { models: JSON.parse(JSON.stringify(MODELS)), jobs: [], pulls: [] }
   on('http.fetch', ($, e) => {
     if (!isUp) return { deny: 'connection refused' }
-    const body = e.url.endsWith('/api/v1/models') ? MODELS : e.url.endsWith('/api/v1/health') ? HEALTH : undefined
+    const path = e.url.replace(/^https?:\/\/[^/]+/, '')
+    let body: unknown
+    if (path === '/api/v1/models?show_all=true') body = { data: lemonade.models }
+    else if (path === '/api/v1/health') body = HEALTH
+    else if (path === '/api/v1/downloads') body = lemonade.jobs
+    else if (path === '/api/v1/pull' && e.init?.method === 'POST') {
+      const pull = JSON.parse(e.init.body ?? '{}') as { model_name: string }
+      lemonade.pulls.push(pull)
+      lemonade.jobs.push({ model_name: pull.model_name, status: 'downloading', running: true, percent: 0 })
+      body = lemonade.jobs.at(-1)
+    }
     return body
       ? { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
       : { value: { status: 404, ok: false, headers: {}, text: '' } }
@@ -71,7 +95,7 @@ function world(
     if (opts.failSteps) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn' as const, usage: null }
   })
-  return { env, asked, session, toasts, runs, stdin }
+  return { env, asked, session, toasts, runs, stdin, lemonade }
 }
 
 async function start($: Engine) {
@@ -173,21 +197,115 @@ describe('model selector entry', () => {
     expect(text).not.toContain('Whisper')
   })
 
-  test('the picker pane changes the entry', async ($, on) => {
-    const { env } = world(on)
-    await start($)
-    await lemonade($, '')
-    const ui = await $.ui.mount({
-      plugin: 'lemonclaude',
-      surface: 'terminal',
-      component: 'Pane',
-      requestId: 'lemonade-picker',
-      props: { title: 'Lemonade model', isFocused: true, bodyColumns: 80, placement: 'dock' } as never,
-      viewport: { columns: 80, rows: 20 },
+})
+
+/** Mounts bare /lemonade's output row, where the model manager draws, on `surface`. */
+async function manager($: Engine, surface: 'terminal' | 'desktop', args = '') {
+  const { text } = await lemonade($, args)
+  return $.ui.mount({
+    plugin: 'lemonclaude',
+    surface,
+    component: 'CommandOutput',
+    requestId: 'm1',
+    props: { command: 'lemonade', args, text: text ?? '', isErrored: false },
+    viewport: { columns: 100, rows: 40 },
+  })
+}
+
+describe('model manager', () => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: lists Lemonade's chat models by recipe, as Lemonade does`, async ($, on) => {
+      world(on)
+      await start($)
+      const ui = await manager($, surface)
+      expect((await ui.find({ key: 'group-llamacpp' }))?.text).toContain('Llama.cpp GPU (3)')
+      expect((await ui.find({ key: 'group-ryzenai-llm' }))?.text).toContain('Ryzen AI LLM (1)')
+      // Speech, music and models Lemonade doesn't suggest stay out.
+      expect(await ui.find({ key: 'group-whispercpp' })).toBeUndefined()
+      expect(await ui.find({ key: 'group-acestep' })).toBeUndefined()
+      expect(await ui.find({ text: /Unlisted-GGUF/ })).toBeUndefined()
+      // The loaded model heads the list; groups open on a press.
+      expect(await ui.find({ key: 'row-Qwen3.5-4B-GGUF' })).toBeDefined()
+      expect(await ui.find({ key: 'row-Not-Pulled-GGUF' })).toBeUndefined()
+      await ui.press({ key: 'group-llamacpp' })
+      expect(await ui.find({ key: 'get-Not-Pulled-GGUF' })).toBeDefined()
+      expect(await ui.find({ key: 'use-Gemma-Chat-GGUF' })).toBeDefined()
     })
-    expect((await ui.find({ key: 'model' }))?.type).toBe('Select')
-    await $.ui.select({ plugin: 'lemonclaude', key: 'model', value: 'Gemma-Chat-GGUF' })
-    expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Gemma-Chat-GGUF')
+
+    test(`${surface}: Use sends requests to that model, and Back to Claude returns`, async ($, on) => {
+      const { asked, env, toasts } = world(on)
+      await start($)
+      const ui = await manager($, surface)
+      await ui.press({ key: 'group-llamacpp' })
+      await ui.press({ key: 'use-Gemma-Chat-GGUF' })
+      expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('Gemma-Chat-GGUF')
+      expect(toasts.some(t => t.includes('Requests now go to 🍋 Gemma-Chat-GGUF'))).toBe(true)
+      expect((await ui.find({ key: 'row-Gemma-Chat-GGUF' }))?.text).toContain('In use')
+      await step($)
+      await ui.press({ key: 'claude' })
+      await step($)
+      expect(asked).toEqual(['Gemma-Chat-GGUF @ http://127.0.0.1:13305', 'claude-opus-5-5 @ default'])
+    })
+  }
+
+  test('Download starts a server-owned download, shows its progress, then offers Use', async ($, on) => {
+    const clock = mock.clock(on)
+    const { lemonade: server, toasts } = world(on)
+    await start($)
+    const ui = await manager($, 'desktop')
+    await ui.press({ key: 'group-llamacpp' })
+    await ui.press({ key: 'get-Not-Pulled-GGUF' })
+    expect(server.pulls).toEqual([{ model_name: 'Not-Pulled-GGUF', stream: true, subscribe: false }])
+
+    server.jobs[0]!.percent = 40
+    await clock.advance(1000)
+    expect((await ui.find({ key: 'row-Not-Pulled-GGUF' }))?.text).toContain('Downloading 40%')
+
+    server.jobs[0] = { model_name: 'Not-Pulled-GGUF', status: 'completed', running: false, percent: 100, complete: true }
+    server.models.find(m => m.id === 'Not-Pulled-GGUF')!.downloaded = true
+    await clock.advance(1000)
+    expect(await ui.find({ key: 'use-Not-Pulled-GGUF' })).toBeDefined()
+    expect(toasts.some(t => t.includes('Downloaded Not-Pulled-GGUF'))).toBe(true)
+  })
+
+  test('the search box filters and opens the groups it leaves', async ($, on) => {
+    world(on)
+    await start($)
+    const ui = await manager($, 'desktop')
+    await ui.input({ key: 'search', text: 'olmo', kind: 'change' })
+    expect(await ui.find({ key: 'get-OLMo-1B-Hybrid' })).toBeDefined()
+    expect(await ui.find({ key: 'group-llamacpp' })).toBeUndefined()
+  })
+
+  test('Downloaded only hides what is not downloaded', async ($, on) => {
+    world(on)
+    await start($)
+    const ui = await manager($, 'desktop')
+    await ui.press({ key: 'downloaded-only' })
+    expect(await ui.find({ key: 'use-Gemma-Chat-GGUF' })).toBeDefined()
+    expect(await ui.find({ key: 'get-Not-Pulled-GGUF' })).toBeUndefined()
+    expect(await ui.find({ key: 'group-ryzenai-llm' })).toBeUndefined()
+  })
+
+  test('says why the list is empty when Lemonade is down', async ($, on) => {
+    world(on, {}, { reachable: false })
+    await start($)
+    const ui = await manager($, 'desktop')
+    expect(await ui.find({ text: /isn't reachable/ })).toBeDefined()
+  })
+
+  test('/lemonade with arguments keeps its text row', async ($, on) => {
+    world(on)
+    // The engine's own drawing of the row, which the plugin hands it to.
+    const drawn: string[] = []
+    on('ui.render', { component: 'CommandOutput' }, ($, e) => {
+      drawn.push(e.props.text)
+      return { type: 'Text', props: {}, children: [e.props.text] } as never
+    })
+    await start($)
+    await manager($, 'desktop', 'list')
+    expect(drawn.length).toBe(1)
+    expect(drawn[0]).toContain('Downloaded chat models')
   })
 })
 

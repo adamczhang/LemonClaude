@@ -37,6 +37,7 @@ This release brings LemonClaude to the Claude Code desktop app and lets you mana
 
 ### Fixed
 
+- A model that takes over 30 seconds to load no longer reads as a failed load. A mod's own requests give up at 30 seconds, so loads go through `curl` with a ten-minute limit, or through the mod's request where `curl` can't run.
 - A request Lemonade answers with an error shows Lemonade's own message, from the error Claude Code reports, instead of a guess that Lemonade didn't answer. "Lemonade isn't running" appears only when it isn't.
 - A conflict with another app's pinned model no longer shows as "Lemonade didn't answer". Lemonade itself answers such a chat request with a misleading "model not found".
 - Lemonade no longer loads LemonClaude's model with its largest window (262K tokens), which took several gigabytes more GPU memory than needed.

@@ -75,7 +75,7 @@ type World = {
 function world(
   on: On,
   initialEnv: Record<string, string> = {},
-  opts: { reachable?: boolean; store?: Record<string, unknown>; failSteps?: boolean; installed?: boolean; startFails?: boolean; noNode?: boolean } = {},
+  opts: { reachable?: boolean; store?: Record<string, unknown>; failSteps?: boolean; installed?: boolean; startFails?: boolean; noNode?: boolean; noCurl?: boolean } = {},
 ): World {
   const env = new Map(Object.entries(initialEnv))
   const asked: string[] = []
@@ -195,6 +195,7 @@ function world(
   on('process.run', async ($, e) => {
     // curl: the way to Lemonade while Claude Code refuses a plugin's own requests.
     if (e.argv[0] === 'curl') {
+      if (opts.noCurl) return { deny: 'spawn curl ENOENT' }
       const url = e.argv.at(-1)!
       const method = e.argv[e.argv.indexOf('-X') + 1]
       lemonade.curled.push(`${method} ${url.replace(/^https?:\/\/[^/]+/, '')}`)
@@ -987,6 +988,27 @@ describe('sharing Lemonade', () => {
     session.model = 'Gemma-Chat-GGUF'
     await step($, session.model)
     expect(toasts.some(t => t.includes('Loaded Gemma-Chat-GGUF with an 8K window.'))).toBe(true)
+  })
+
+  test('a load goes through curl, given ten minutes: a plugin request gives up at 30 s', async ($, on) => {
+    const { session, lemonade: server } = world(on)
+    server.loaded = []
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(server.curled).toContain('POST /api/v1/load')
+    expect(server.loads).toEqual([{ model_name: 'Gemma-Chat-GGUF', ctx_size: 65536, pinned: true }])
+  })
+
+  test('without curl, a load goes through the plugin request', async ($, on) => {
+    const { session, asked, lemonade: server } = world(on, {}, { noCurl: true })
+    server.loaded = []
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(server.curled).toEqual([])
+    expect(server.loads).toEqual([{ model_name: 'Gemma-Chat-GGUF', ctx_size: 65536, pinned: true }])
+    expect(asked).toEqual(['Gemma-Chat-GGUF @ http://127.0.0.1:13305'])
   })
 
   test('LEMONCLAUDE_CTX_SIZE sets the window, never under 4096', async ($, on) => {

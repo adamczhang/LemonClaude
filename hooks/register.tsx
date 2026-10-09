@@ -70,21 +70,37 @@ async function baseUrl($: $): Promise<string> {
 type Answer = { ok: boolean; status: number; text: string }
 
 /**
- * A request to Lemonade. Some Claude Code versions (2.1.287) refuse a plugin's own requests while
- * CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set (people set it for privacy, and `lemonade launch
- * claude` does), so a refused one goes out through curl instead: Lemonade is this mod's essential traffic.
+ * A request to Lemonade.
+ * - Some Claude Code versions (2.1.287) refuse a plugin's own requests while
+ *   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set (people set it for privacy, and `lemonade launch
+ *   claude` does), so a refused one goes out through curl instead: Lemonade is this mod's essential traffic.
+ * - A plugin's own request gives up after 30 s, and Lemonade answers a load only once the model is in
+ *   memory, which can take longer. A request given `seconds` goes through curl with that limit, or
+ *   through the plugin's own request where curl can't run.
  * Rejects when Lemonade can't be reached either way.
  */
-async function askLemonade($: $, url: string, init: { method?: string; body?: string } = {}): Promise<Answer> {
-  const headers = init.body ? { 'Content-Type': 'application/json' } : undefined
+async function askLemonade($: $, url: string, init: { method?: string; body?: string; seconds?: number } = {}): Promise<Answer> {
+  const { seconds, ...request } = init
+  if (seconds) {
+    const curled = await curl($, url, request, seconds).catch((err: unknown) => err as Error)
+    if (!(curled instanceof Error)) return curled
+    if (!/spawn|ENOENT|not found|not recognized/i.test(curled.message)) throw curled
+  }
+  const headers = request.body ? { 'Content-Type': 'application/json' } : undefined
   try {
-    return await $.http.fetch(url, { ...init, ...(headers ? { headers } : {}) })
+    return await $.http.fetch(url, { ...request, ...(headers ? { headers } : {}) })
   } catch (err) {
     if (!/nonessential/i.test(String(err))) throw err
   }
-  const argv = ['curl', '-sS', '-m', '20', '-X', init.method ?? 'GET', '-w', '\n%{http_code}']
+  return curl($, url, request, 20)
+}
+
+/** A request to Lemonade through curl, given `seconds` to answer (up to just under ten minutes, the most a process may run). */
+async function curl($: $, url: string, init: { method?: string; body?: string }, seconds: number): Promise<Answer> {
+  const limit = Math.min(seconds, 590)
+  const argv = ['curl', '-sS', '-m', String(limit), '-X', init.method ?? 'GET', '-w', '\n%{http_code}']
   if (init.body) argv.push('-H', 'Content-Type: application/json', '--data-binary', '@-')
-  const ran = await $.process.run([...argv, url], { ...(init.body ? { stdin: init.body } : {}), timeoutMs: 25_000 })
+  const ran = await $.process.run([...argv, url], { ...(init.body ? { stdin: init.body } : {}), timeoutMs: (limit + 5) * 1000 })
   if (ran.exitCode !== 0) throw new Error(ran.stderr.trim() || `curl exited ${ran.exitCode}`)
   const cut = ran.stdout.lastIndexOf('\n')
   const status = Number(ran.stdout.slice(cut + 1))
@@ -542,6 +558,8 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
   const ctx = await ctxSize($)
   const load = () =>
     askLemonade($, `${base}/api/v1/load`, {
+      // A big model, or a bundle loading model by model, can take minutes.
+      seconds: 590,
       method: 'POST',
       body: JSON.stringify({ model_name: model, ctx_size: ctx, pinned: true }),
     }).catch((err: unknown): Answer => ({ ok: false, status: 0, text: JSON.stringify({ error: unreachable(base, err) }) }))

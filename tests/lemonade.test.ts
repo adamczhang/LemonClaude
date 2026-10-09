@@ -88,6 +88,8 @@ function world(
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.model', () => ({ value: session.model }))
+  // Claude Code's own handling of a failed turn, beneath the plugin: nothing to add.
+  on('classic.StopFailure', () => ({}) as never)
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', ($, e) => {
     toasts.push(JSON.stringify(e))
@@ -288,13 +290,70 @@ describe('model selector entry', () => {
     expect(env.get('ANTHROPIC_CUSTOM_MODEL_OPTION')).toBe('my-gateway-model')
   })
 
-  test('picking the remembered entry routes to Lemonade and says when it does not answer', async ($, on) => {
+  test('picking the remembered entry routes to Lemonade and says when it is not running', async ($, on) => {
     const { asked, session, toasts } = world(on, {}, { reachable: false, failSteps: true })
     await start($)
     session.model = 'Qwen3.5-4B-GGUF'
     await step($, session.model)
     expect(asked).toEqual(['Qwen3.5-4B-GGUF @ http://127.0.0.1:13305'])
-    expect(toasts.some(t => t.includes("Lemonade didn't answer"))).toBe(true)
+    await $.classic.StopFailure({ error: 'unknown', error_details: 'Connection error.' } as never)
+    expect(toasts.some(t => t.includes("Lemonade isn't running at http://127.0.0.1:13305."))).toBe(true)
+  })
+
+  test("a request Lemonade answers with an error says what Lemonade said", async ($, on) => {
+    const { session, toasts } = world(on, {}, { failSteps: true })
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    await $.classic.StopFailure({
+      error: 'invalid_request',
+      error_details: '400 {"type":"error","error":{"type":"invalid_request_error","message":"the request exceeds the available context size (65536 tokens)"}}',
+    } as never)
+    expect(
+      toasts.some(t =>
+        t.includes('Lemonade couldn\'t answer with Qwen3.5-4B-GGUF: the request exceeds the available context size (65536 tokens). Pick a Claude model to go back.'),
+      ),
+    ).toBe(true)
+    // No guess beside it.
+    expect(toasts.some(t => t.includes("didn't answer"))).toBe(false)
+  })
+
+  test("when Claude Code gives no details, Lemonade's words come from its API Error line", async ($, on) => {
+    const { session, toasts } = world(on, {}, { failSteps: true })
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    // As seen live: kind unknown, no details, the message in the last assistant message.
+    await $.classic.StopFailure({
+      error: 'unknown',
+      last_assistant_message: 'API Error: 400 request (33996 tokens) exceeds the available context size (4096 tokens), try increasing it',
+    } as never)
+    expect(
+      toasts.some(t =>
+        t.includes(
+          "Lemonade couldn't answer with Qwen3.5-4B-GGUF: request (33996 tokens) exceeds the available context size (4096 tokens), try increasing it. Pick a Claude model to go back.",
+        ),
+      ),
+    ).toBe(true)
+  })
+
+  test('a failure while Claude answers says nothing about Lemonade', async ($, on) => {
+    const { toasts } = world(on)
+    await start($)
+    await step($)
+    await $.classic.StopFailure({ error: 'rate_limit', error_details: '429 too many requests' } as never)
+    expect(toasts.some(t => t.includes('Lemonade'))).toBe(false)
+  })
+
+  test('a failure LemonClaude already explained is not told twice', async ($, on) => {
+    const { session, toasts, lemonade: server } = world(on, {}, { failSteps: true })
+    server.loaded = [{ model_name: 'Their-Model-GGUF', type: 'llm', pinned: true, recipe_options: { ctx_size: 8192 } }]
+    await start($)
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    await $.classic.StopFailure({ error: 'model_not_found', error_details: "model 'Gemma-Chat-GGUF' not found, try pulling it first" } as never)
+    expect(toasts.filter(t => t.includes('Another app has pinned'))).toHaveLength(1)
+    expect(toasts.some(t => t.includes("couldn't answer"))).toBe(false)
   })
 
   test('/lemonade <model> changes the entry', async ($, on) => {

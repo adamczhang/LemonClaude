@@ -197,7 +197,8 @@ To run two chat models at once, raise `max_loaded_models` in Lemonade's settings
 | --- | --- |
 | `/lemonade` is an unknown command | The mod isn't loaded: check `--plugin-dir` or `CLAUDE_CODE_PLUGIN_DIRS`, then start a new session |
 | No 🍋 entry in the selector | In the desktop app that's expected: use `/lemonade on`. In the terminal, run `/lemonade list` to see what's offered |
-| "Lemonade didn't answer" toast | Start Lemonade Server, or check `LEMONADE_BASE_URL` |
+| "Lemonade isn't running at …" | Start Lemonade Server, or check `LEMONADE_BASE_URL` |
+| "Lemonade couldn't answer with …: …" | That's Lemonade's own error. For a model that can't fit the request in its window, raise `LEMONCLAUDE_CTX_SIZE` or pick a Claude model |
 | "Lemonade Server didn't answer … within 60 s of starting" | Start Lemonade Server from the Start menu and check it runs. Its tray icon opens the logs |
 | The first reply is slow | Loading a model takes a few seconds, and its first answer can take 20 seconds or more. `/lemonade on` loads before you ask anything |
 | "Another app has pinned Lemonade's chat models (…)" | Another app holds Lemonade's chat slot. Unload its model there, raise `max_loaded_models` in Lemonade's settings, or pick a Claude model |

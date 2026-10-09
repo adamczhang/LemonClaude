@@ -588,6 +588,25 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
 // The last toast and when: requests that arrive together (a step and its subagents') say a thing once.
 let lastSaid = { text: '', at: 0 }
 
+// When LemonClaude last said why a request to Lemonade would fail (a conflict, a failed start), so the
+// failure that follows isn't told twice.
+let explainedAt = 0
+
+/**
+ * What Lemonade said in an API error, as Claude Code passes it on: the `message` inside a JSON error
+ * body when there is one, else the text as it came, cut to a readable length.
+ */
+export function lemonadeSaid(details: string): string {
+  const at = details.indexOf('{')
+  if (at >= 0) {
+    const body = parsed(details.slice(at)) as { error?: { message?: unknown } | string; message?: unknown } | undefined
+    const said = typeof body?.error === 'object' ? body.error.message : (body?.error ?? body?.message)
+    if (typeof said === 'string' && said.trim()) return said.trim()
+  }
+  const text = details.trim()
+  return text.length > 300 ? `${text.slice(0, 300)}…` : text
+}
+
 function say($: $, text: string): void {
   const now = Date.now()
   if (text === lastSaid.text && now - lastSaid.at < 10_000) return
@@ -987,15 +1006,29 @@ export const register: Register = on => {
         hasSaidWhy = true
       }
     }
+    if (hasSaidWhy) explainedAt = Date.now()
     await route($, model)
     const result = yield* next(model ? { ...e, model } : e)
     // A collection that didn't answer may have been unloaded: load it again next time.
     if (model && result.stopReason === null) collections.delete(model)
-    // No response from Lemonade is most often a server that isn't running.
-    if (model && !hasSaidWhy && result.stopReason === null && !next.signal.aborted) {
-      say($, `Lemonade didn't answer at ${await baseUrl($)}. Start Lemonade Server, or pick a Claude model.`)
-    }
     return result
+  })
+
+  // A turn that failed while requests went to Lemonade: say what Lemonade said, from the error Claude
+  // Code reports, rather than guess. Unless LemonClaude just said why itself.
+  on('classic.StopFailure', async ($, e, next) => {
+    const model = await read($, routed)
+    if (model && !e.agent_id && Date.now() - explainedAt > 60_000) {
+      const base = await baseUrl($)
+      if (!(await answers($, base))) say($, `Lemonade isn't running at ${base}. Start Lemonade Server, or pick a Claude model.`)
+      else {
+        // Claude Code leaves error_details empty for some errors; its "API Error: ..." line, the last
+        // assistant message, carries Lemonade's words then.
+        const said = lemonadeSaid(e.error_details ?? '') || lemonadeSaid((e.last_assistant_message ?? '').replace(/^API Error:\s*\d*\s*/i, ''))
+        say($, `Lemonade couldn't answer with ${model}: ${said || e.error}. Pick a Claude model to go back.`)
+      }
+    }
+    return next(e)
   })
 
   // Bare /lemonade draws its output row as a model manager after Lemonade's own: a row the desktop app

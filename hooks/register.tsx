@@ -971,7 +971,7 @@ export const register: Register = on => {
     const arg = e.args.trim()
     const [word = '', ...rest] = arg.split(/\s+/)
     if (arg === 'list' || arg === 'status') return { text: await describe($, await refresh($)) }
-    if (arg === 'off') return { text: await switchOff($) }
+    if (arg === 'off' || arg === 'stop') return { text: await switchOff($) }
     await ensureServer($)
     if (word === 'on') return { text: await switchOn($, rest.join(' ')) }
     if (arg) return { text: await choose($, arg) }

@@ -117,7 +117,7 @@ The list shows only chat models, the ones Claude Code can talk to. Lemonade's sp
 | `/lemonade` | Opens the model manager |
 | `/lemonade on` | Sends every request to the offered Lemonade model, whatever the model selector shows, until `/lemonade off` or you pick another model |
 | `/lemonade on <model>` | Offers that model and switches to it |
-| `/lemonade off` | Requests follow the model selector again |
+| `/lemonade off` (or `stop`) | Requests follow the model selector again |
 | `/lemonade <model>` | Offers a downloaded model in the selector. It takes the exact id or any unique part of it, such as `/lemonade gemma` |
 | `/lemonade list` | Lists the downloaded models, what the selector offers, and where requests go now |
 

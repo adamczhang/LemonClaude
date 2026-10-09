@@ -727,6 +727,15 @@ describe('/lemonade on and off', () => {
     ])
   })
 
+  test('/lemonade stop is /lemonade off', async ($, on) => {
+    const { asked } = world(on)
+    await start($)
+    await lemonade($, 'on')
+    expect((await lemonade($, 'stop')).text).toContain('Claude answers')
+    await step($)
+    expect(asked).toEqual(['claude-opus-5-5 @ default'])
+  })
+
   test('/lemonade off leaves a session whose selector has 🍋 on Lemonade', async ($, on) => {
     const { session, asked } = world(on)
     await start($)

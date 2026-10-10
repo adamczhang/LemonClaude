@@ -50,6 +50,10 @@ type Lemonade = {
   loads: Array<{ model_name: string; ctx_size?: number; pinned?: boolean }>
   /** Each /internal/pin body. */
   pins: Array<{ model_name: string; pinned: boolean }>
+  /** /api/v1/stats: how many requests Lemonade has answered, and the last one's token counts. */
+  stats: { request_count_total: number; input_tokens: number; cache_tokens: number; output_tokens: number }
+  /** Requests another app makes while each of the session's is answered. */
+  othersPerStep?: number
 }
 
 type World = {
@@ -124,6 +128,7 @@ function world(
     loaded: [{ model_name: 'Qwen3.5-4B-GGUF', type: 'llm', pinned: false, recipe_options: { ctx_size: 262144 } }],
     loads: [],
     pins: [],
+    stats: { request_count_total: 7, input_tokens: 4, cache_tokens: 12, output_tokens: 30 },
   }
   const agents: World['agents'] = []
   const spawns: string[][] = []
@@ -190,6 +195,7 @@ function world(
       }
       body = { model_name: load.model_name, status: 'success' }
     }
+    else if (path === '/api/v1/stats') body = lemonade.stats
     else if (path === '/api/v1/downloads') body = lemonade.jobs
     else if (path === '/api/v1/system-info') body = lemonade.system ?? SYSTEM
     else if (path === '/api/v1/pull' && method === 'POST') {
@@ -231,7 +237,14 @@ function world(
   on('turn.step', async function* ($, e) {
     asked.push(`${e.model} @ ${env.get('ANTHROPIC_BASE_URL') ?? 'default'}`)
     if (opts.failSteps) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
-    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn' as const, usage: null }
+    // Lemonade counts the request in its stats, and its streamed reply says 0 for both counts.
+    const isLemonade = env.get('ANTHROPIC_BASE_URL') === 'http://127.0.0.1:13305'
+    if (isLemonade) {
+      lemonade.stats = { request_count_total: lemonade.stats.request_count_total + 1 + (lemonade.othersPerStep ?? 0), input_tokens: 26000, cache_tokens: 4000, output_tokens: 12 }
+    }
+    const usage = isLemonade ? { ...NO_USAGE, model: e.model } : { ...NO_USAGE, model: e.model, input_tokens: 100, cache_read_input_tokens: 9000, output_tokens: 5 }
+    yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage }
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn' as const, usage }
   })
   return { env, asked, session, toasts, runs, stdin, lemonade, agents, spawns, commands }
 }
@@ -244,11 +257,16 @@ async function lemonade($: Engine, args: string) {
   return $.command.run({ command: 'lemonade', args })
 }
 
+const NO_USAGE = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+
+/** One model request of a turn; the usage its stop chunk reached Claude Code with. */
 async function step($: Engine, model = 'claude-opus-5-5', agentId?: string) {
   const stream = $.turn.step({ turnId: 't1', index: 0, model, messageCount: 1, ...(agentId ? { agentId } : {}) })
-  for await (const _ of stream) {
-    // drain
+  let usage: unknown
+  for await (const chunk of stream) {
+    if (chunk.kind === 'stop') usage = chunk.usage
   }
+  return usage
 }
 
 describe('model selector entry', () => {
@@ -864,6 +882,36 @@ describe('context windows', () => {
     await start($)
     const ui = await manager($, 'desktop')
     expect((await ui.find({ key: 'row-Qwen3.5-4B-GGUF' }))?.text).toContain('256K window')
+  })
+})
+
+describe('token counts', () => {
+  test("a Lemonade reply's token counts come from Lemonade's stats, for the context meter", async ($, on) => {
+    const { session } = world(on)
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    expect(await step($, session.model)).toEqual({
+      model: 'Qwen3.5-4B-GGUF',
+      input_tokens: 26000,
+      cache_read_input_tokens: 4000,
+      cache_creation_input_tokens: 0,
+      output_tokens: 12,
+    })
+  })
+
+  test("Claude's own counts pass untouched", async ($, on) => {
+    const { lemonade: server } = world(on)
+    await start($)
+    expect(await step($)).toEqual({ ...NO_USAGE, model: 'claude-opus-5-5', input_tokens: 100, cache_read_input_tokens: 9000, output_tokens: 5 })
+    expect(server.fetched).not.toContain('/api/v1/stats')
+  })
+
+  test("another app's request in between leaves the reply's counts as they were: the stats may be its", async ($, on) => {
+    const { session, lemonade: server } = world(on)
+    server.othersPerStep = 1
+    await start($)
+    session.model = 'Qwen3.5-4B-GGUF'
+    expect(await step($, session.model)).toEqual({ ...NO_USAGE, model: 'Qwen3.5-4B-GGUF' })
   })
 })
 

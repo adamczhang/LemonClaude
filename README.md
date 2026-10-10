@@ -141,6 +141,8 @@ Claude Code's own prompt (its instructions and tool definitions) is about 34K to
 - This works when the Lemonade model is the session's model: picked with 🍋 in the terminal's `/model`, or switched to by `/lemonade on`, which runs `/model <model>` for you (and `/lemonade off` switches back to the Claude model you had).
 - If an app puts its own Claude model back as the session's model, requests still go to Lemonade, but Claude Code measures context against that Claude model's window.
 
+**The fill is the real count.** Lemonade's streamed replies report 0 tokens, so LemonClaude takes each request's real counts from Lemonade's stats (`/api/v1/stats`) and hands those to Claude Code, which fills the circle and decides when to compact from them. For an Omni model, the proxy reports the counts itself. `/context`'s breakdown by category is still Claude Code's own estimate, because Lemonade can't count tokens for it, and it runs high: about 66K where the real request is about 34K.
+
 ### When Lemonade isn't running
 
 The 🍋 entry still appears, offering the model from last time.
@@ -199,6 +201,7 @@ To run two chat models at once, raise `max_loaded_models` in Lemonade's settings
 - **Download size:** the model manager shows each model's size but doesn't check free disk space. If a download fails, Lemonade's reason shows in the row.
 - **API keys:** a Lemonade server that requires `LEMONADE_API_KEY` isn't supported yet.
 - **Context window:** LemonClaude tells Claude Code the window the Lemonade model has, so the context meter and auto-compaction follow it, as long as the Lemonade model is the session's model (see [Context windows](#context-windows)).
+- **Token counts:** if another app's request reaches Lemonade while one of Claude Code's is answered, LemonClaude can't tell whose counts Lemonade's stats hold, so that reply counts as 0 tokens and the context meter skips it until the next reply.
 - **Background calls:** Claude Code may print an `unrecognized_model` notice. Its background calls (session titles and similar) ask for Claude models, and Lemonade answers them with a 404 while requests go to Lemonade.
 - **Omni models:** an Omni model's reply appears all at once rather than word by word. Thinking blocks don't carry over, and token counts are estimates.
 - **Model quality:** small local models follow Claude Code's tool protocol less reliably than Claude does. Models without the `tool-calling` label may fail to use tools at all.

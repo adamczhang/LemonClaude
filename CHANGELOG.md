@@ -30,6 +30,7 @@ This release brings LemonClaude to the Claude Code desktop app and lets you mana
   - While requests go to a Lemonade model, Claude Code is told that model's window (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`), so the context circle, `/context` and auto-compaction follow it rather than an assumed 200K.
   - `/lemonade on` also makes the Lemonade model the session's model (it runs `/model <model>`), and `/lemonade off` switches back to the Claude model you had. `/lemonade on` keeps routing if an app puts its own model back.
   - The model list shows each loaded model's window.
+  - The context meter reads the real token count of each Lemonade reply. Lemonade's streamed replies say 0 tokens, so LemonClaude takes the counts from Lemonade's stats, and the Omni proxy sends its own on the closing event.
 - Support for `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. With it set, some Claude Code versions (2.1.287) refuse a mod's own network requests, and LemonClaude reaches Lemonade through `curl` instead.
 
 ### Changed

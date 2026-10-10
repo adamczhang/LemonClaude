@@ -171,7 +171,8 @@ export function streamEvents(message) {
     }
     events.push(['content_block_stop', { type: 'content_block_stop', index }])
   })
-  events.push(['message_delta', { type: 'message_delta', delta: { stop_reason: message.stop_reason, stop_sequence: null }, usage: { output_tokens: message.usage.output_tokens } }])
+  // message_start went out before the answer, with no counts yet: the input's count rides here, as the Messages API's own does.
+  events.push(['message_delta', { type: 'message_delta', delta: { stop_reason: message.stop_reason, stop_sequence: null }, usage: { ...message.usage } }])
   events.push(['message_stop', { type: 'message_stop' }])
   return events
 }

@@ -133,6 +133,8 @@ test('end to end: a streamed request is answered as a Messages stream, its image
     assert.ok(existsSync(file))
     assert.deepEqual(readFileSync(file), PNG)
     assert.equal(stream[4].data.delta.stop_reason, 'end_turn')
+    // message_start can't know the counts yet; the closing delta carries them, the input's too.
+    assert.deepEqual(stream[4].data.usage, { input_tokens: 50, output_tokens: 9 })
     // Lemonade was asked through chat completions, for the bundle, unstreamed.
     assert.equal(lemonade.seen[0].path, '/v1/chat/completions')
     assert.equal(lemonade.seen[0].body.model, 'user.Kit')

@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, TurnUsage } from 'claude-code'
 
 import type { DownloadState, LemonadeModel, Recipe, SavedEnv } from '../types'
 
@@ -460,6 +460,54 @@ async function loadedNow($: $, base: string): Promise<Loaded[] | null> {
 
 async function answers($: $, base: string): Promise<boolean> {
   return (await loadedNow($, base)) !== null
+}
+
+/** Lemonade's running count of requests and the last one's token counts, as /api/v1/stats has them. */
+type Stats = { request_count_total?: number; input_tokens?: number; cache_tokens?: number; output_tokens?: number }
+
+/** Lemonade's stats now, or null when it doesn't answer them. */
+async function statsNow($: $, base: string): Promise<Stats | null> {
+  const answer = await askLemonade($, `${base}/api/v1/stats`).catch(() => undefined)
+  const stats = answer?.ok ? parsed(answer.text) : undefined
+  return stats && typeof stats === 'object' ? (stats as Stats) : null
+}
+
+/** True when a reply says it was answered over no input at all: Lemonade's streamed replies say so (2026.40). */
+export function isUncounted(usage: TurnUsage | null): boolean {
+  return !usage || usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens === 0
+}
+
+/**
+ * The token counts of the one request Lemonade answered since `before`, from its stats: undefined while
+ * it hasn't counted it yet, null when that can't be told (another app's request came in between).
+ */
+export function countedUsage(before: Stats, after: Stats | null, model: string): TurnUsage | null | undefined {
+  const was = before.request_count_total
+  const now = after?.request_count_total
+  if (typeof was !== 'number' || typeof now !== 'number') return null
+  if (now === was) return undefined
+  if (now !== was + 1 || typeof after?.input_tokens !== 'number') return null
+  return {
+    model,
+    input_tokens: after.input_tokens,
+    cache_read_input_tokens: after.cache_tokens ?? 0,
+    cache_creation_input_tokens: 0,
+    output_tokens: after.output_tokens ?? 0,
+  }
+}
+
+/**
+ * What a step's request really cost, when Lemonade's reply said 0: Claude Code's context meter and
+ * auto-compaction go by the counts a reply carries. Waits briefly for Lemonade to count the request.
+ */
+async function usageSince($: $, before: Stats, model: string): Promise<TurnUsage | null> {
+  const base = await baseUrl($)
+  for (let tries = 0; tries < 4; tries++) {
+    if (tries) await new Promise<void>(done => $.clock.after(100, done))
+    const usage = countedUsage(before, await statsNow($, base), model)
+    if (usage !== undefined) return usage
+  }
+  return null
 }
 
 /** The context window LemonClaude loads models with by default: LEMONCLAUDE_CTX_SIZE (at least 4096), else 64K. */
@@ -1157,10 +1205,20 @@ export const register: Register = on => {
     }
     if (hasSaidWhy) explainedAt = Date.now()
     await route($, model)
-    const result = yield* next(model ? { ...e, model } : e)
+    // Lemonade's streamed reply counts no tokens; its stats do. An Omni model's proxy counts its own.
+    const before = model && !(await isBundle($, model)) ? await statsNow($, await baseUrl($)) : null
+    const stream = next(model ? { ...e, model } : e)
+    let counted: TurnUsage | null = null
+    for await (const chunk of stream) {
+      if (chunk.kind === 'stop' && before && isUncounted(chunk.usage)) {
+        counted = await usageSince($, before, chunk.usage?.model ?? model!)
+        yield counted ? { ...chunk, usage: counted } : chunk
+      } else yield chunk
+    }
+    const result = await stream.result
     // A collection that didn't answer may have been unloaded: load it again next time.
     if (model && result.stopReason === null) collections.delete(model)
-    return result
+    return counted ? { ...result, usage: counted } : result
   })
 
   // A turn that failed while requests went to Lemonade: say what Lemonade said, from the error Claude

@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 // Lemonade's catalog, as /api/v1/models?show_all=true lists it.
 const MODELS = [
   { id: 'Qwen3.5-4B-GGUF', size: 3.34, downloaded: true, suggested: true, recipe: 'llamacpp', labels: ['chat', 'vision', 'tool-calling'] },
-  { id: 'Gemma-Chat-GGUF', size: 2.1, downloaded: true, suggested: true, recipe: 'llamacpp', labels: ['chat'] },
+  { id: 'Gemma-Chat-GGUF', size: 2.1, downloaded: true, suggested: true, recipe: 'llamacpp', labels: ['chat'], max_context_window: 131072 },
   { id: 'Whisper-Large-v3-Turbo', size: 1.62, downloaded: true, suggested: true, recipe: 'whispercpp', labels: ['transcription'] },
   { id: 'Not-Pulled-GGUF', size: 9, downloaded: false, suggested: true, recipe: 'llamacpp', labels: ['chat', 'tool-calling'] },
   { id: 'OLMo-1B-Hybrid', size: 0.65, downloaded: false, suggested: true, recipe: 'ryzenai-llm', labels: ['chat'] },
@@ -29,7 +29,7 @@ const SYSTEM = {
 
 /** Lemonade's side of a world: its catalog, the download jobs /api/v1/downloads lists, and each pull body. */
 type Lemonade = {
-  models: Array<{ id: string; size: number; downloaded: boolean; suggested: boolean; recipe: string; labels: string[] }>
+  models: Array<{ id: string; size: number; downloaded: boolean; suggested: boolean; recipe: string; labels: string[]; max_context_window?: number }>
   jobs: Array<Record<string, unknown>>
   pulls: unknown[]
   /** Every path fetched, in order. */
@@ -60,6 +60,8 @@ type World = {
   runs: string[][]
   stdin: string[]
   lemonade: Lemonade
+  /** Each of Claude Code's own slash commands LemonClaude ran, as typed. */
+  commands: string[]
   /** Each process LemonClaude spawned (the Omni proxy), by argv. */
   spawns: string[][]
   /** The session's subagents, as $.agent.list answers. */
@@ -80,6 +82,7 @@ function world(
   const env = new Map(Object.entries(initialEnv))
   const asked: string[] = []
   const session = { model: 'claude-opus-5-5' }
+  const commands: string[] = []
   const toasts: string[] = []
   const runs: string[][] = []
   const stdin: string[] = []
@@ -88,6 +91,12 @@ function world(
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.model', () => ({ value: session.model }))
+  // Claude Code's own slash commands, beneath the plugin: /model switches the session's model.
+  on('command.run', ($, e) => {
+    commands.push(`/${e.command} ${e.args}`.trim())
+    if (e.command === 'model') session.model = e.args
+    return { text: '' }
+  })
   // Claude Code's own handling of a failed turn, beneath the plugin: nothing to add.
   on('classic.StopFailure', () => ({}) as never)
   on('ui.status', () => ({ value: undefined }))
@@ -224,7 +233,7 @@ function world(
     if (opts.failSteps) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn' as const, usage: null }
   })
-  return { env, asked, session, toasts, runs, stdin, lemonade, agents, spawns }
+  return { env, asked, session, toasts, runs, stdin, lemonade, agents, spawns, commands }
 }
 
 async function start($: Engine) {
@@ -771,6 +780,90 @@ describe('/lemonade on and off', () => {
     await start($)
     await lemonade($, 'on')
     expect((await lemonade($, 'list')).text).toContain('Requests go to Qwen3.5-4B-GGUF via Lemonade (/lemonade on')
+  })
+})
+
+describe('context windows', () => {
+  test("Claude Code is told the window the model is loaded with, and gets its own value back", async ($, on) => {
+    const { env, session } = world(on, { CLAUDE_CODE_MAX_CONTEXT_TOKENS: '200000' })
+    await start($)
+    // Already loaded by someone else with its own window: that's the one it has.
+    session.model = 'Qwen3.5-4B-GGUF'
+    await step($, session.model)
+    expect(env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('262144')
+    // Loaded by LemonClaude: its window.
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('65536')
+    session.model = 'claude-opus-5-5'
+    await step($)
+    expect(env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('200000')
+  })
+
+  test('/lemonade on makes the Lemonade model the session model; off puts the Claude model back', async ($, on) => {
+    const clock = mock.clock(on)
+    const { asked, commands, session } = world(on)
+    await start($)
+    await lemonade($, 'on gemma')
+    // Run just after the command finishes.
+    await clock.advance(10)
+    await step($, session.model)
+    expect(commands).toContain('/model Gemma-Chat-GGUF')
+    expect(session.model).toBe('Gemma-Chat-GGUF')
+    await lemonade($, 'off')
+    await clock.advance(10)
+    expect(commands).toContain('/model claude-opus-5-5')
+    await step($, session.model)
+    expect(asked).toEqual(['Gemma-Chat-GGUF @ http://127.0.0.1:13305', 'claude-opus-5-5 @ default'])
+  })
+
+  test('/lemonade on holds where an app puts its own model back', async ($, on) => {
+    const { asked, session } = world(on)
+    await start($)
+    await lemonade($, 'on gemma')
+    // As a picker that keeps its own choice would.
+    session.model = 'claude-opus-5-5'
+    await step($)
+    expect(asked).toEqual(['Gemma-Chat-GGUF @ http://127.0.0.1:13305'])
+  })
+
+  test('/lemonade window shows, sets, reloads and resets the window, per model', async ($, on) => {
+    const { env, lemonade: server } = world(on)
+    server.loaded = []
+    await start($)
+    await lemonade($, 'on gemma')
+    expect((await lemonade($, 'window')).text).toBe('Gemma-Chat-GGUF loads with a 64K window, the default. Change it with /lemonade window 32K, 128K, … or default.')
+
+    const smaller = await lemonade($, 'window 32K')
+    expect(smaller.text).toContain('Reloaded Gemma-Chat-GGUF with a 32K window.')
+    expect(smaller.text).toContain("Claude Code's own prompt is about 34K tokens")
+    expect(server.loads.at(-1)).toEqual({ model_name: 'Gemma-Chat-GGUF', ctx_size: 32768, pinned: true })
+    expect(env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('32768')
+
+    expect((await lemonade($, 'window 128k')).text).toBe('Reloaded Gemma-Chat-GGUF with a 128K window.')
+    expect((await lemonade($, 'window 1M')).text).toBe('Gemma-Chat-GGUF holds at most 128K tokens.')
+    expect((await lemonade($, 'window 1K')).text).toBe('A window needs at least 4K tokens.')
+    expect((await lemonade($, 'window lots')).text).toContain('"lots" isn\'t a window size')
+    expect((await lemonade($, 'window default')).text).toBe('Reloaded Gemma-Chat-GGUF with a 64K window.')
+    expect(env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('65536')
+  })
+
+  test('a window set while another app holds the model applies at the next load', async ($, on) => {
+    const { lemonade: server } = world(on)
+    // Qwen is loaded already, and pinned, by another app, at 256K.
+    server.loaded[0]!.pinned = true
+    await start($)
+    await lemonade($, 'on Qwen3.5-4B-GGUF')
+    server.loads.length = 0
+    expect((await lemonade($, 'window 32K')).text).toContain('Qwen3.5-4B-GGUF will load with a 32K window.')
+    expect(server.loads).toEqual([])
+  })
+
+  test('the model list shows a loaded model\'s window', async ($, on) => {
+    world(on)
+    await start($)
+    const ui = await manager($, 'desktop')
+    expect((await ui.find({ key: 'row-Qwen3.5-4B-GGUF' }))?.text).toContain('256K window')
   })
 })
 

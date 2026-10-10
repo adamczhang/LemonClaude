@@ -25,6 +25,11 @@ This release brings LemonClaude to the Claude Code desktop app and lets you mana
   - Subagents of another plugin's agent type are passed through untouched.
   - The model manager marks models another app has pinned.
   - `/lemonade on` loads before switching, says "Loaded … with a 64K window" or exactly why not, and doesn't switch to a model that can't load.
+- Context windows:
+  - `/lemonade window [size|default]` shows or sets the window of the Lemonade model in use or offered (`32K`, `128K`, a token count). It's remembered per model, never past the largest window Lemonade says the model holds, and reloads the model when LemonClaude has it loaded for requests.
+  - While requests go to a Lemonade model, Claude Code is told that model's window (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`), so the context circle, `/context` and auto-compaction follow it rather than an assumed 200K.
+  - `/lemonade on` also makes the Lemonade model the session's model (it runs `/model <model>`), and `/lemonade off` switches back to the Claude model you had. `/lemonade on` keeps routing if an app puts its own model back.
+  - The model list shows each loaded model's window.
 - Support for `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. With it set, some Claude Code versions (2.1.287) refuse a mod's own network requests, and LemonClaude reaches Lemonade through `curl` instead.
 
 ### Changed

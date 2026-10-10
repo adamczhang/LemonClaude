@@ -141,6 +141,8 @@ export async function listCatalog($: $, base: string): Promise<{ models: Lemonad
     suggested?: boolean
     /** A bundle's models, by id. */
     components?: string[]
+    /** The largest window the model holds, as Lemonade knows it. */
+    max_context_window?: number
   }>
   const labelsOf = new Map(data.map(m => [m.id, m.labels ?? []]))
 
@@ -185,10 +187,13 @@ export async function listCatalog($: $, base: string): Promise<{ models: Lemonad
       size: m.size,
       labels: m.labels ?? [],
       recipe: m.recipe ?? '',
+      ...(m.components?.length ? { components: m.components } : {}),
       isDownloaded: m.downloaded !== false,
       // A bundle calls tools through its chat model: Lemonade labels the model, not the bundle.
       hasTools: [m.id, ...(m.components ?? [])].some(id => (labelsOf.get(id) ?? []).includes('tool-calling')),
       isLoaded: loaded.has(m.id),
+      ...(m.max_context_window ? { maxWindow: m.max_context_window } : {}),
+      ...(loaded.get(m.id)?.recipe_options?.ctx_size ? { window: loaded.get(m.id)!.recipe_options!.ctx_size! } : {}),
       ...(fits(m.size, recipeOf(m.recipe ?? '')) ? {} : { isTooBig: true }),
       ...(loaded.get(m.id)?.pinned ? { pin: m.id in held ? ('mine' as const) : ('theirs' as const) } : {}),
     }))
@@ -410,7 +415,8 @@ function sizeRange(models: readonly LemonadeModel[]): string {
 
 function tags(m: LemonadeModel): string {
   const pin = m.pin === 'theirs' ? 'pinned by another app' : m.pin === 'mine' ? 'pinned' : ''
-  return [m.isTooBig ? 'too big' : '', m.hasTools ? 'tools' : '', ...['vision', 'reasoning', 'coding'].filter(l => m.labels.includes(l)), pin]
+  const window = m.window ? `${windowShort(m.window)} window` : ''
+  return [m.isTooBig ? 'too big' : '', m.hasTools ? 'tools' : '', ...['vision', 'reasoning', 'coding'].filter(l => m.labels.includes(l)), window, pin]
     .filter(Boolean)
     .join(' · ')
 }
@@ -442,7 +448,7 @@ async function download($: $, id: string): Promise<void> {
 }
 
 /** A model Lemonade has in memory, as /api/v1/health lists it. */
-type Loaded = { model_name: string; pinned?: boolean; type?: string }
+type Loaded = { model_name: string; pinned?: boolean; type?: string; recipe_options?: { ctx_size?: number } }
 
 /** What Lemonade has loaded now, or null when it doesn't answer. */
 async function loadedNow($: $, base: string): Promise<Loaded[] | null> {
@@ -456,11 +462,45 @@ async function answers($: $, base: string): Promise<boolean> {
   return (await loadedNow($, base)) !== null
 }
 
-/** The context window LemonClaude loads models with: LEMONCLAUDE_CTX_SIZE (at least 4096), else 64K. */
+/** The context window LemonClaude loads models with by default: LEMONCLAUDE_CTX_SIZE (at least 4096), else 64K. */
 async function ctxSize($: $): Promise<number> {
   const said = Number(await $.env.get('LEMONCLAUDE_CTX_SIZE'))
   return Number.isInteger(said) && said > 0 ? Math.max(MIN_CTX_SIZE, said) : DEFAULT_CTX_SIZE
 }
+
+/** The windows set with /lemonade window, by model; in the store, so they last across sessions. */
+async function chosenWindows($: $): Promise<Record<string, number>> {
+  const kept = await $.store.get('windows')
+  return kept && typeof kept === 'object' ? { ...(kept as Record<string, number>) } : {}
+}
+
+/**
+ * The window LemonClaude loads `model` with: the size set for it with /lemonade window, else the
+ * default; never past the largest Lemonade says it holds.
+ */
+async function windowFor($: $, model: string): Promise<number> {
+  const size = (await chosenWindows($))[model] ?? (await ctxSize($))
+  const largest = (await read($, catalog)).find(m => m.id === model)?.maxWindow
+  return largest ? Math.min(size, largest) : size
+}
+
+/** A window size as people write it, in tokens: `32K`, `128k`, `1M`, `65536`; null when it isn't one. */
+export function parseWindow(said: string): number | null {
+  const found = /^(\d+(?:\.\d+)?)\s*([km]?)$/i.exec(said.trim())
+  if (!found) return null
+  const unit = found[2]!.toLowerCase()
+  const size = Math.round(Number(found[1]) * (unit === 'k' ? 1024 : unit === 'm' ? 1024 * 1024 : 1))
+  return Number.isInteger(size) && size > 0 ? size : null
+}
+
+/** A window's size, short: `64K`, or the token count when it isn't whole K. */
+function windowShort(ctx: number): string {
+  return ctx % 1024 === 0 ? `${ctx / 1024}K` : `${ctx}`
+}
+
+// The window each model is loaded with now, as LemonClaude loaded or found it: what Claude Code is
+// told the model holds, so its context meter and compaction follow the model's real window.
+const loadedWindows = new Map<string, number>()
 
 /**
  * A window's size with its article, as said aloud: an 8K, an 80K, an 8192-token (eight...), an 11K, an
@@ -541,6 +581,7 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
   if (collections.has(model)) return { ok: true }
   const here = before.find(m => m.model_name === model)
   if (here) {
+    if (here.recipe_options?.ctx_size) loadedWindows.set(model, here.recipe_options.ctx_size)
     // Loaded already: pin it, never load it again, which would reload it with another window.
     if (!here.pinned && (await setPin($, base, model, true))) await remember($, model, true)
     else if (model in mineBefore && Date.now() - mineBefore[model]! > 60_000) await remember($, model, true)
@@ -555,7 +596,7 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
   if (!known) return { ok: false, message: `Lemonade lists no model named ${model}.` }
   if (!known.isDownloaded) return { ok: false, message: `${model} isn't downloaded. Download it from /lemonade first.` }
 
-  const ctx = await ctxSize($)
+  const ctx = await windowFor($, model)
   const load = () =>
     askLemonade($, `${base}/api/v1/load`, {
       // A big model, or a bundle loading model by model, can take minutes.
@@ -592,6 +633,11 @@ async function loadModel($: $, model: string): Promise<LoadOutcome> {
   await remember($, model, true)
   if (known.recipe.startsWith('collection.')) collections.add(model)
   const after = (await loadedNow($, base)) ?? []
+  // A collection's chat model loads with its own window: tell Claude Code that one.
+  const window = known.recipe.startsWith('collection.')
+    ? after.find(m => m.type === 'llm' && (known.components ?? []).includes(m.model_name))?.recipe_options?.ctx_size
+    : ctx
+  if (window) loadedWindows.set(model, window)
   // Another app's model that made room: unpinned, not LemonClaude's, and gone now.
   const gone = before
     .filter(m => !m.pinned && !(m.model_name in mineBefore) && !after.some(a => a.model_name === m.model_name))
@@ -757,6 +803,7 @@ async function snapshot($: $): Promise<SavedEnv> {
   return {
     ANTHROPIC_BASE_URL: (await $.env.get('ANTHROPIC_BASE_URL')) ?? null,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: (await $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')) ?? null,
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: (await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')) ?? null,
   }
 }
 
@@ -770,6 +817,17 @@ async function snapshot($: $): Promise<SavedEnv> {
 async function applyEnv($: $, env: SavedEnv): Promise<void> {
   await $.env.set('ANTHROPIC_BASE_URL', env.ANTHROPIC_BASE_URL ?? undefined)
   await $.env.set('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ?? undefined)
+  await $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? undefined)
+}
+
+/**
+ * Tells Claude Code the window `model` really has. Claude Code reads CLAUDE_CODE_MAX_CONTEXT_TOKENS for
+ * a model it doesn't know, which a Lemonade model is when it's the session's model, so its context
+ * meter, /context and auto-compaction measure against the model's window rather than an assumed 200K.
+ */
+async function tellWindow($: $, model: string): Promise<void> {
+  const window = loadedWindows.get(model) ?? (await windowFor($, model))
+  if ((await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')) !== String(window)) await $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', String(window))
 }
 
 /** True for an Omni model: a collection of models Lemonade runs as one (`collection.omni`), such as LMX-Omni. */
@@ -830,6 +888,7 @@ export async function route($: $, model: string | null): Promise<void> {
   if (was === model) {
     // Still routed there: a proxy that was started again listens on another port.
     if (target && (await $.env.get('ANTHROPIC_BASE_URL')) !== target) await $.env.set('ANTHROPIC_BASE_URL', target)
+    if (model) await tellWindow($, model)
     return
   }
   if (model) {
@@ -839,6 +898,7 @@ export async function route($: $, model: string | null): Promise<void> {
       await update($, saved, () => env)
     }
     await $.env.set('ANTHROPIC_BASE_URL', target ?? undefined)
+    await tellWindow($, model)
   } else {
     const env = await read($, saved)
     if (env) await applyEnv($, env)
@@ -858,7 +918,10 @@ export async function route($: $, model: string | null): Promise<void> {
 async function lemonadeModelOf($: $, sessionModel: string): Promise<string | null> {
   const over = await read($, heldOver)
   if (over !== null) {
-    if (sessionModel === over) return read($, offered)
+    // /lemonade on holds while the session's model is the one it held over, or the Lemonade model it
+    // switched the session to; another pick in a picker ends it.
+    const lemon = await read($, offered)
+    if (sessionModel === over || sessionModel === lemon) return lemon
     await update($, heldOver, () => null as string | null)
   }
   if (sessionModel === (await read($, offered))) return sessionModel
@@ -909,21 +972,88 @@ async function switchOn($: $, query: string): Promise<string> {
   const loaded = await ensureLoaded($, id)
   if (!loaded.ok && loaded.message) return loaded.message
   const sessionModel = await $.session.model()
-  await update($, heldOver, () => sessionModel as string | null)
+  // Held over the Claude model the session had (kept when it's on Lemonade already, so off goes back).
+  const before = await read($, heldOver)
+  if (before === null || sessionModel !== id) await update($, heldOver, () => (sessionModel === id ? before : sessionModel) as string | null)
   await route($, id)
+  // Make it the session's model, as picking it would: Claude Code then measures context against its
+  // window. Queued for when the session is idle; where an app puts its own model back, routing holds anyway.
+  if (sessionModel !== id) runModelCommand($, id)
   const m = named ?? (await downloadedModels($)).find(x => x.id === id)
   const how = `Requests now go to 🍋 ${id} via Lemonade. /lemonade off, or picking another model, goes back.`
   return `${loaded.message ? `${loaded.message} ` : ''}${how}${m ? caveats(m) : ''}`
 }
 
+/**
+ * Runs Claude Code's own `/model <model>`, just after the command that asks for it has finished: a
+ * plugin's slash command can't run inside the one the session is waiting on.
+ */
+function runModelCommand($: $, model: string, tries = 4): void {
+  $.clock.after(tries === 4 ? 0 : 500, () =>
+    void $.command.run({ command: 'model', args: model }).catch((err: unknown) => {
+      // Still inside the asking command: try again shortly.
+      if (tries > 1 && /command\.run hook/.test(String(err))) runModelCommand($, model, tries - 1)
+      else $.ui.log(`/model ${model} didn't run: ${String(err)}`, { to: 'debug' })
+    }),
+  )
+}
+
 /** `/lemonade off`: requests follow the session's model again. */
 async function switchOff($: $): Promise<string> {
+  const over = await read($, heldOver)
   await update($, heldOver, () => null as string | null)
-  const model = await lemonadeModelOf($, await $.session.model())
+  // Back to the model the session had before /lemonade on, if /lemonade on switched it.
+  const now = await $.session.model()
+  const goesBack = over !== null && over !== now && now === (await read($, offered))
+  if (goesBack) runModelCommand($, over)
+  const model = await lemonadeModelOf($, goesBack ? over : now)
   await route($, model)
   return model
     ? `Requests follow the model selector again. It has 🍋 ${model} selected, so they still go to Lemonade.`
     : 'Requests follow the model selector again, so Claude answers.'
+}
+
+/**
+ * `/lemonade window [size|default]`: the context window of the Lemonade model in use, or offered, shown
+ * or set, remembered for that model. A model LemonClaude loaded for requests now reloads with it.
+ */
+async function setWindow($: $, said: string): Promise<string> {
+  const model = (await read($, routed)) ?? (await read($, offered))
+  if (!model) return 'No Lemonade model is offered yet. Choose one with /lemonade <model> first.'
+  const windows = await chosenWindows($)
+  if (!said) {
+    const size = await windowFor($, model)
+    const loadedAs = loadedWindows.get(model)
+    const now = loadedAs && loadedAs !== size ? ` It's loaded with ${windowName(loadedAs)} window now.` : ''
+    return `${model} loads with ${windowName(size)} window${model in windows ? '' : ', the default'}.${now} Change it with /lemonade window 32K, 128K, … or default.`
+  }
+  if (said === 'default') delete windows[model]
+  else {
+    const size = parseWindow(said)
+    if (!size) return `"${said}" isn't a window size. Try 32K, 64K, 128K, or a number of tokens.`
+    if (size < MIN_CTX_SIZE) return `A window needs at least ${windowShort(MIN_CTX_SIZE)} tokens.`
+    const largest = (await read($, catalog)).find(m => m.id === model)?.maxWindow
+    if (largest && size > largest) return `${model} holds at most ${windowShort(largest)} tokens.`
+    windows[model] = size
+  }
+  await $.store.set('windows', windows)
+  const size = await windowFor($, model)
+  // Claude Code's own request is about 34K tokens before any conversation (seen live).
+  const tight = size < 48 * 1024 ? " Claude Code's own prompt is about 34K tokens, so this leaves little room for the conversation." : ''
+  // In use, and LemonClaude's to reload: reload it with the new window now.
+  if ((await read($, routed)) === model && model in (await ours($)) && !collections.has(model) && loadedWindows.get(model) !== size) {
+    const base = await baseUrl($)
+    const answer = await askLemonade($, `${base}/api/v1/load`, {
+      seconds: 590,
+      method: 'POST',
+      body: JSON.stringify({ model_name: model, ctx_size: size, pinned: true }),
+    }).catch((err: unknown): Answer => ({ ok: false, status: 0, text: JSON.stringify({ error: unreachable(base, err) }) }))
+    if (!answer.ok) return `Saved ${windowName(size)} window for ${model}, but Lemonade couldn't reload it: ${errorOf(answer.text) ?? `it answered ${answer.status}`}`
+    loadedWindows.set(model, size)
+    await tellWindow($, model)
+    return `Reloaded ${model} with ${windowName(size)} window.${tight}`
+  }
+  return `${model} will load with ${windowName(size)} window.${tight}`
 }
 
 /** What `/lemonade` and `/lemonade list` print, from the downloaded models `refresh` just fetched. */
@@ -949,7 +1079,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'lemonade',
-      description: 'Use a local Lemonade model: /lemonade opens the model list; /lemonade on, off, <model>, list',
+      description: 'Use a local Lemonade model: /lemonade opens the model list; /lemonade on, off, <model>, window, list',
     })
 
     // Pins a session left when it ended without a goodbye (a crash) would hold Lemonade's slots for good.
@@ -990,6 +1120,7 @@ export const register: Register = on => {
     const [word = '', ...rest] = arg.split(/\s+/)
     if (arg === 'list' || arg === 'status') return { text: await describe($, await refresh($)) }
     if (arg === 'off' || arg === 'stop') return { text: await switchOff($) }
+    if (word === 'window') return { text: await setWindow($, rest.join(' ')) }
     await ensureServer($)
     if (word === 'on') return { text: await switchOn($, rest.join(' ')) }
     if (arg) return { text: await choose($, arg) }

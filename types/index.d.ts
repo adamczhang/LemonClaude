@@ -12,6 +12,12 @@ export type LemonadeModel = {
   hasTools: boolean
   /** True while Lemonade has it loaded in memory. */
   isLoaded: boolean
+  /** The largest context window it holds, in tokens, as Lemonade knows it. */
+  maxWindow?: number
+  /** While loaded, the window it is loaded with, in tokens. */
+  window?: number
+  /** A collection's models (an Omni model's), by id. */
+  components?: string[]
   /** True when it is too big for the memory its recipe runs in on this machine. */
   isTooBig?: boolean
   /** Who pinned it, while it is loaded and pinned: LemonClaude (`mine`) or another app (`theirs`). */
@@ -40,6 +46,8 @@ export type Recipe = {
 export type SavedEnv = {
   ANTHROPIC_BASE_URL: string | null
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: string | null
+  /** Absent in an environment saved by an earlier version. */
+  CLAUDE_CODE_MAX_CONTEXT_TOKENS?: string | null
 }
 
 declare module 'claude-code' {

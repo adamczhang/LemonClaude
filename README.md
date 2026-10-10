@@ -120,6 +120,7 @@ The list shows only chat models, the ones Claude Code can talk to. Lemonade's sp
 | `/lemonade off` (or `stop`) | Requests follow the model selector again |
 | `/lemonade <model>` | Offers a downloaded model in the selector. It takes the exact id or any unique part of it, such as `/lemonade gemma` |
 | `/lemonade list` | Lists the downloaded models, what the selector offers, and where requests go now |
+| `/lemonade window [size]` | Shows or sets the context window of the Lemonade model in use (or offered), such as `/lemonade window 32K` or `128K`; `default` goes back to the default. Remembered per model |
 
 Claude Code allows only one custom entry in the selector. LemonClaude offers the model you chose last time. The first time, it offers the first downloaded model that supports tool calling. If requests already go to Lemonade, choosing another model moves them to it at once.
 
@@ -128,6 +129,17 @@ Claude Code allows only one custom entry in the selector. LemonClaude offers the
 LMX-Omni and other Omni models are several models Lemonade runs as one: a chat model, plus models that make images or speech. You pick one like any model. Images and audio it makes are saved as files in `~/.lemonclaude/media`, and the reply links them instead of carrying the data into the conversation.
 
 One difference sits underneath: Lemonade runs Omni models only on its OpenAI-style endpoint, and Claude Code speaks Anthropic's. So for an Omni model, LemonClaude starts a small proxy for the session (`proxy/omni-proxy.mjs`, on Node.js) that translates between the two. Without Node.js, LemonClaude says so and stays on the current model.
+
+### Context windows
+
+Each Lemonade model is loaded with a context window: 64K tokens by default (`LEMONCLAUDE_CTX_SIZE`), or the size you set for that model with `/lemonade window`. It can't go past the largest window Lemonade says the model holds. Changing the window of the model you're using reloads it with the new size. A model another app has loaded keeps its window until LemonClaude next loads it.
+
+Claude Code's own prompt (its instructions and tool definitions) is about 34K tokens before any conversation. A window much under 48K leaves little room.
+
+**The context meter follows the Lemonade model.** While requests go to a Lemonade model, LemonClaude tells Claude Code that model's window (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`). So the context circle, `/context` and auto-compaction measure against the window the model really has, not Claude's.
+
+- This works when the Lemonade model is the session's model: picked with 🍋 in the terminal's `/model`, or switched to by `/lemonade on`, which runs `/model <model>` for you (and `/lemonade off` switches back to the Claude model you had).
+- If an app puts its own Claude model back as the session's model, requests still go to Lemonade, but Claude Code measures context against that Claude model's window.
 
 ### When Lemonade isn't running
 
@@ -145,7 +157,7 @@ If Lemonade still doesn't answer, a toast says so and suggests picking a Claude 
 | `LEMONADE_BASE_URL` | `http://127.0.0.1:13305` | Where Lemonade Server listens |
 | `LEMONCLAUDE_LEMONADE_MODEL` | `Qwen3.5-4B-GGUF` | The model to offer while Lemonade is down and no earlier choice is remembered |
 | `LEMONCLAUDE_AUTOSTART` | on | Set to `0` so LemonClaude never starts Lemonade Server |
-| `LEMONCLAUDE_CTX_SIZE` | `65536` | The context window LemonClaude loads models with, in tokens (at least 4096). 64K holds Claude Code's own prompt and tools, about 20–30K tokens, plus a conversation |
+| `LEMONCLAUDE_CTX_SIZE` | `65536` | The default context window LemonClaude loads models with, in tokens (at least 4096). `/lemonade window` sets one per model |
 | `ANTHROPIC_CUSTOM_MODEL_OPTION` | none | If you've set this yourself for something other than Lemonade, LemonClaude leaves your entry alone |
 
 ### Privacy
@@ -186,7 +198,7 @@ To run two chat models at once, raise `max_loaded_models` in Lemonade's settings
 - **Starting Lemonade:** only on Windows, and only with Lemonade Server installed by its Windows installer in `%LOCALAPPDATA%\lemonade_server`. LemonClaude never stops the server it starts.
 - **Download size:** the model manager shows each model's size but doesn't check free disk space. If a download fails, Lemonade's reason shows in the row.
 - **API keys:** a Lemonade server that requires `LEMONADE_API_KEY` isn't supported yet.
-- **Context window:** Claude Code budgets context as if it were talking to Claude. The real limit is the window LemonClaude loads the model with, 64K by default (`LEMONCLAUDE_CTX_SIZE`). If another app already loaded the model with a different window, LemonClaude uses it as loaded rather than reload it.
+- **Context window:** LemonClaude tells Claude Code the window the Lemonade model has, so the context meter and auto-compaction follow it, as long as the Lemonade model is the session's model (see [Context windows](#context-windows)).
 - **Background calls:** Claude Code may print an `unrecognized_model` notice. Its background calls (session titles and similar) ask for Claude models, and Lemonade answers them with a 404 while requests go to Lemonade.
 - **Omni models:** an Omni model's reply appears all at once rather than word by word. Thinking blocks don't carry over, and token counts are estimates.
 - **Model quality:** small local models follow Claude Code's tool protocol less reliably than Claude does. Models without the `tool-calling` label may fail to use tools at all.

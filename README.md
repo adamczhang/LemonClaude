@@ -53,25 +53,39 @@ LemonClaude was built and tested on Windows 11, on an AMD Ryzen AI laptop with a
 
 ## Install
 
-Clone the repository:
+At the prompt of a terminal session (`claude`), type:
 
-```bash
-git clone https://github.com/adamczhang/LemonClaude.git
+```
+/plugin install lemonclaude --marketplace adamczhang/LemonClaude
 ```
 
-Load it for one session:
+Answer `y` to add the marketplace, then pick the user scope. LemonClaude then loads in every session, the desktop app's included. Sessions already open in the desktop app pick it up when they start again.
+
+Or from a shell:
+
+```bash
+claude plugin marketplace add adamczhang/LemonClaude
+```
+
+```bash
+claude plugin install lemonclaude@lemonclaude
+```
+
+To update to the latest version:
+
+```bash
+claude plugin marketplace update lemonclaude
+```
+
+```bash
+claude plugin update lemonclaude@lemonclaude
+```
+
+To try a copy of your own instead (a clone you're changing, say), load it from its folder for one session:
 
 ```bash
 claude --plugin-dir /path/to/LemonClaude
 ```
-
-To load it in every session, the desktop app included, add it to the `env` block of `~/.claude/settings.json`:
-
-```json
-"env": { "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/LemonClaude" }
-```
-
-On Windows, escape the backslashes, as in `"D:\\Projects\\LemonClaude"`. Settings are read when a session starts, so open a new session afterwards.
 
 ## Use
 
@@ -212,7 +226,7 @@ To run two chat models at once, raise `max_loaded_models` in Lemonade's settings
 
 | Symptom | Fix |
 | --- | --- |
-| `/lemonade` is an unknown command | The mod isn't loaded: check `--plugin-dir` or `CLAUDE_CODE_PLUGIN_DIRS`, then start a new session |
+| `/lemonade` is an unknown command | The mod isn't loaded: check `claude plugin list` (or your `--plugin-dir`), then start a new session |
 | No 🍋 entry in the selector | In the desktop app that's expected: use `/lemonade on`. In the terminal, run `/lemonade list` to see what's offered |
 | "Lemonade isn't running at …" | Start Lemonade Server, or check `LEMONADE_BASE_URL` |
 | "Lemonade couldn't answer with …: …" | That's Lemonade's own error. For a model that can't fit the request in its window, raise `LEMONCLAUDE_CTX_SIZE` or pick a Claude model |

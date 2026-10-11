@@ -1,0 +1,12 @@
+{
+  "name": "lemonclaude",
+  "description": "LemonClaude: Lemonade local models in Claude Code's model selector",
+  "owner": { "name": "Adam Zhang", "email": "adam.dadvibes@gmail.com" },
+  "plugins": [
+    {
+      "name": "lemonclaude",
+      "source": "./",
+      "description": "Switch a Claude Code session between Claude and a local Lemonade model mid-conversation: /lemonade lists, downloads and switches models"
+    }
+  ]
+}

@@ -59,7 +59,8 @@ type Lemonade = {
 type World = {
   env: Map<string, string>
   asked: string[]
-  session: { model: string }
+  /** The session's model, and the size of its conversation as the last reply counted it. */
+  session: { model: string; tokens?: number }
   toasts: string[]
   runs: string[][]
   stdin: string[]
@@ -85,7 +86,7 @@ function world(
 ): World {
   const env = new Map(Object.entries(initialEnv))
   const asked: string[] = []
-  const session = { model: 'claude-opus-5-5' }
+  const session: World['session'] = { model: 'claude-opus-5-5' }
   const commands: string[] = []
   const toasts: string[] = []
   const runs: string[][] = []
@@ -95,6 +96,7 @@ function world(
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.model', () => ({ value: session.model }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: session.tokens, window: 200000 }, rateLimits: [] } }) as never)
   // Claude Code's own slash commands, beneath the plugin: /model switches the session's model.
   on('command.run', ($, e) => {
     commands.push(`/${e.command} ${e.args}`.trim())
@@ -875,6 +877,47 @@ describe('context windows', () => {
     server.loads.length = 0
     expect((await lemonade($, 'window 32K')).text).toContain('Qwen3.5-4B-GGUF will load with a 32K window.')
     expect(server.loads).toEqual([])
+  })
+
+  test("a conversation longer than the model's window is stopped short, with what to do", async ($, on) => {
+    const { session, toasts } = world(on)
+    await start($)
+    session.tokens = 100_000
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(toasts.join('\n')).toContain(
+      "This conversation is about 100K tokens, more than Gemma-Chat-GGUF's 64K window holds. Pick a Claude model and /compact it first, or give it a larger window: /lemonade window 128K.",
+    )
+    // Past even the largest window the model holds: no larger window to suggest.
+    session.tokens = 159_804
+    await step($, session.model)
+    expect(toasts.join('\n')).toContain("This conversation is about 160K tokens, more than Gemma-Chat-GGUF's 64K window holds. Pick a Claude model and /compact it first.")
+  })
+
+  test('a compaction the model has no room for is told what to do, ahead of the failure', async ($, on) => {
+    const { session, toasts } = world(on)
+    on('session.compact', () => ({ skip: 'as the engine would fail it' }))
+    await start($)
+    await lemonade($, 'on gemma')
+    await step($, session.model)
+    session.tokens = 100_000
+    await $.session.compact({ trigger: 'auto', messages: [] } as never)
+    expect(toasts.join('\n')).toContain("This conversation is about 100K tokens, more than Gemma-Chat-GGUF's 64K window holds.")
+  })
+
+  test('a conversation that fits goes without a word', async ($, on) => {
+    const { session, toasts } = world(on)
+    await start($)
+    session.tokens = 40_000
+    session.model = 'Gemma-Chat-GGUF'
+    await step($, session.model)
+    expect(toasts.join('\n')).not.toContain('This conversation')
+  })
+
+  test("/lemonade off when Lemonade wasn't on says so", async ($, on) => {
+    world(on)
+    await start($)
+    expect((await lemonade($, 'off')).text).toBe("Lemonade wasn't on: Claude answers.")
   })
 
   test('the model list shows a loaded model\'s window', async ($, on) => {

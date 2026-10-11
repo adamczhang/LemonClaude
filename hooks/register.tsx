@@ -1048,6 +1048,7 @@ function runModelCommand($: $, model: string, tries = 4): void {
 
 /** `/lemonade off`: requests follow the session's model again. */
 async function switchOff($: $): Promise<string> {
+  const wasOn = (await read($, routed)) !== null
   const over = await read($, heldOver)
   await update($, heldOver, () => null as string | null)
   // Back to the model the session had before /lemonade on, if /lemonade on switched it.
@@ -1056,9 +1057,22 @@ async function switchOff($: $): Promise<string> {
   if (goesBack) runModelCommand($, over)
   const model = await lemonadeModelOf($, goesBack ? over : now)
   await route($, model)
-  return model
-    ? `Requests follow the model selector again. It has 🍋 ${model} selected, so they still go to Lemonade.`
-    : 'Requests follow the model selector again, so Claude answers.'
+  if (model) return `Requests follow the model selector again. It has 🍋 ${model} selected, so they still go to Lemonade.`
+  return wasOn || over !== null ? 'Requests follow the model selector again, so Claude answers.' : "Lemonade wasn't on: Claude answers."
+}
+
+/**
+ * Why the conversation can't go to `model`: it's longer already than the window the model is loaded
+ * with, as when a long session switches to it. Claude Code can't compact it in time (it learns the
+ * window only now), and a compaction would go to the same model. Undefined when it fits.
+ */
+async function tooLong($: $, model: string): Promise<string | undefined> {
+  const size = (await $.session.usage().catch(() => undefined))?.context.tokens
+  const window = loadedWindows.get(model) ?? (await windowFor($, model))
+  if (!size || size < window) return undefined
+  const largest = (await read($, catalog)).find(m => m.id === model)?.maxWindow
+  const larger = largest && largest > size ? `, or give it a larger window: /lemonade window ${windowShort(largest)}` : ''
+  return `This conversation is about ${Math.round(size / 1000)}K tokens, more than ${model}'s ${windowShort(window)} window holds. Pick a Claude model and /compact it first${larger}.`
 }
 
 /**
@@ -1197,7 +1211,8 @@ export const register: Register = on => {
         if (loaded.message) say($, loaded.message)
         hasSaidWhy = !loaded.ok && loaded.message !== undefined
       }
-      const problem = hasSaidWhy ? undefined : await bundleProblem($, model)
+      // A subagent's conversation is its own, and short: the session's size is the main loop's.
+      const problem = hasSaidWhy ? undefined : ((await bundleProblem($, model)) ?? (e.agentId ? undefined : await tooLong($, model)))
       if (problem) {
         say($, problem)
         hasSaidWhy = true
@@ -1219,6 +1234,18 @@ export const register: Register = on => {
     // A collection that didn't answer may have been unloaded: load it again next time.
     if (model && result.stopReason === null) collections.delete(model)
     return counted ? { ...result, usage: counted } : result
+  })
+
+  // Compaction goes to the same model, so one that can't hold the conversation can't summarize it
+  // either: say what to do instead, ahead of the failure.
+  on('session.compact', async ($, e, next) => {
+    const model = e.agentId || (e.trigger !== 'auto' && e.trigger !== 'manual') ? null : await read($, routed)
+    const problem = model ? await tooLong($, model) : undefined
+    if (problem) {
+      say($, problem)
+      explainedAt = Date.now()
+    }
+    return next(e)
   })
 
   // A turn that failed while requests went to Lemonade: say what Lemonade said, from the error Claude

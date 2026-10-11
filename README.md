@@ -136,6 +136,8 @@ Each Lemonade model is loaded with a context window: 64K tokens by default (`LEM
 
 Claude Code's own prompt (its instructions and tool definitions) is about 34K tokens before any conversation. A window much under 48K leaves little room.
 
+Switching a long conversation to a Lemonade model can leave it bigger than the model's window, and then neither the model nor a compaction can take it, since compaction goes to the same model. LemonClaude says so before the request fails: how big the conversation is, and what to do. Either pick a Claude model and `/compact` first, or give the model a larger window with `/lemonade window`, if it holds one.
+
 **The context meter follows the Lemonade model.** While requests go to a Lemonade model, LemonClaude tells Claude Code that model's window (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`). So the context circle, `/context` and auto-compaction measure against the window the model really has, not Claude's.
 
 - This works when the Lemonade model is the session's model: picked with 🍋 in the terminal's `/model`, or switched to by `/lemonade on`, which runs `/model <model>` for you (and `/lemonade off` switches back to the Claude model you had).
